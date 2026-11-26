@@ -59,6 +59,7 @@ use crate::modal::{
 #[derive(Clone, Copy)]
 enum FieldKind {
    Text,
+   Lines,
    Number,
    Secret,
 }
@@ -118,11 +119,7 @@ impl SharedString {
       }
       // SAFETY: `inner` holds `16 + s.len()` bytes, aligned to 8.
       unsafe {
-         #[expect(
-            clippy::cast_ptr_alignment,
-            reason = "allocated with 8-byte alignment"
-         )]
-         inner.cast::<[usize; 2]>().write([1, 1]);
+         inner.cast::<[usize; 2]>().write_unaligned([1, 1]);
          ptr::copy_nonoverlapping(s.as_ptr(), inner.add(16), s.len());
       }
       Self {
@@ -1467,6 +1464,192 @@ pub fn wrap_with_accessories(
    true
 }
 
+/// Muted accessory text, for lines without a color of their own.
+const ACCESSORY_MUTED: [f32; 4] = [0.60, 0.08, 0.62, 0.85];
+
+/// One piece of an inline accessory: SVG icons when it has them and the build
+/// can draw them, else its text.
+#[derive(Clone, Debug)]
+pub struct Piece {
+   pub text:  String,
+   pub color: Option<u32>,
+   /// Asset paths from [`crate::icons::register`], each with its own color.
+   pub icons: Vec<(&'static str, Option<u32>)>,
+}
+
+/// GPUI's `Svg` builders and layout, resolved by [`locate_svg`].
+#[cfg(target_arch = "x86_64")]
+struct SvgSymbols {
+   new:       SvgNewFn,
+   path:      SvgPathFn,
+   into_any:  SvgIntoAnyFn,
+   style_box: usize,
+}
+
+#[cfg(target_arch = "x86_64")]
+type RawSvg = Scratch<{ layout::SVG_CAP }>;
+#[cfg(target_arch = "x86_64")]
+type SvgNewFn = unsafe extern "C" fn(*mut RawSvg, *const c_void) -> *mut RawSvg;
+#[cfg(target_arch = "x86_64")]
+type SvgPathFn = unsafe extern "C" fn(*mut RawSvg, *mut RawSvg, *const u8, usize) -> *mut RawSvg;
+#[cfg(target_arch = "x86_64")]
+type SvgIntoAnyFn = unsafe extern "C" fn(*mut RawAnyElement, *mut RawSvg) -> *mut RawAnyElement;
+
+#[cfg(target_arch = "x86_64")]
+static SVG: OnceLock<SvgSymbols> = OnceLock::new();
+
+/// Resolves the `Svg` builders, after [`locate`].
+#[cfg(target_arch = "x86_64")]
+pub fn locate_svg(image: &Image<'static>) {
+   let found = match sigs::svg_builders(image) {
+      Ok(found) => found,
+      Err(err) => {
+         log::warn!("desktop gpui: {err}, icons fall back to text");
+         return;
+      },
+   };
+   if found.size > layout::SVG_CAP {
+      log::warn!(
+         "desktop gpui: Svg is {:#x} bytes, over {:#x}",
+         found.size,
+         layout::SVG_CAP
+      );
+      return;
+   }
+   // SAFETY: decoded from the code drawing a bundled icon, which calls them
+   // with these Rust-ABI signatures.
+   let symbols = unsafe {
+      SvgSymbols {
+         new:       std::mem::transmute::<usize, SvgNewFn>(found.new),
+         path:      std::mem::transmute::<usize, SvgPathFn>(found.path),
+         into_any:  std::mem::transmute::<usize, SvgIntoAnyFn>(found.into_any),
+         style_box: found.style_box,
+      }
+   };
+   let _ = SVG.set(symbols);
+   log::info!("desktop gpui: resolved Svg builders {found:x?}");
+}
+
+/// Whether icons can be drawn.
+#[cfg(target_arch = "x86_64")]
+pub fn svg_ready() -> bool {
+   SVG.get().is_some() && SYMBOLS.get().is_some()
+}
+
+/// `len` bytes from Discord's own allocator, so Discord can free them.
+pub fn discord_alloc(len: usize) -> Option<*mut u8> {
+   let sym = SYMBOLS.get()?;
+   // SAFETY: Discord's `alloc_or_oom(align, size)`, which aborts rather than
+   // returning null.
+   let ptr = unsafe { (sym.alloc_or_oom)(1, len.max(1)) };
+   (!ptr.is_null()).then_some(ptr)
+}
+
+/// An `svg().path(path)` of `px` pixels filled with `color`, as an
+/// `AnyElement`.
+#[cfg(target_arch = "x86_64")]
+fn svg_icon(
+   b: &Builder,
+   svg: &SvgSymbols,
+   path: &'static str,
+   px: f32,
+   color: [f32; 4],
+) -> RawAnyElement {
+   let mut fresh = RawSvg::zeroed();
+   let mut icon = RawSvg::zeroed();
+   // SAFETY: `svg()` builds into a buffer that fits an `Svg`, and `path` moves
+   // it into the second with a `'static` path.
+   unsafe {
+      (svg.new)(&raw mut fresh, b.sym.caller_loc);
+      (svg.path)(&raw mut icon, &raw mut fresh, path.as_ptr(), path.len());
+   }
+   // SAFETY: the `Svg`'s boxed `StyleRefinement`, at the decoded offset.
+   let style = unsafe {
+      icon
+         .as_mut_ptr()
+         .add(svg.style_box)
+         .cast::<*mut u8>()
+         .read_unaligned()
+   };
+   if !style.is_null() {
+      let s = Style {
+         ptr: style,
+         at:  &b.sym.layout.style,
+      };
+      s.lengths(&s.at.size, gpui_px(px));
+      s.float(s.at.flex_shrink, 0.0);
+      s.hsla(s.at.text_color, color);
+   }
+   let mut any = MaybeUninit::<RawAnyElement>::uninit();
+   // SAFETY: moves the `Svg` into a 32-byte `AnyElement`.
+   unsafe {
+      (svg.into_any)(any.as_mut_ptr(), &raw mut icon);
+      any.assume_init()
+   }
+}
+
+/// `pieces` side by side in a row: each piece's icons when it has any and
+/// they can be drawn, else its text.
+#[cfg(target_arch = "x86_64")]
+fn inline_row(b: &Builder, pieces: &[Piece], font_px: f32) -> RawDiv {
+   let mut row = b.h_row(4.0, false);
+   for piece in pieces {
+      let hsla = piece.color.map_or(ACCESSORY_MUTED, argb_to_hsla);
+      if let Some(svg) = SVG.get().filter(|_| !piece.icons.is_empty()) {
+         let mut icons = b.h_row(2.0, false);
+         for &(path, color) in &piece.icons {
+            let mut icon = svg_icon(
+               b,
+               svg,
+               path,
+               font_px + 3.0,
+               color.map_or(hsla, argb_to_hsla),
+            );
+            b.push_any(&mut icons, &mut icon);
+         }
+         row = b.push_div(row, icons);
+      } else if !piece.text.is_empty()
+         && let Some(line) = b.text_line(&piece.text, hsla, font_px)
+      {
+         row = b.push_div(row, line);
+      }
+   }
+   row
+}
+
+/// Adds `pieces` as one more child of a `Div` Discord built by value, like the
+/// member name's row right after the name, `lead` pixels after the child
+/// before them.
+#[cfg(target_arch = "x86_64")]
+pub fn append_pieces(div: *mut c_void, pieces: &[Piece], lead: f32) -> bool {
+   let Some(sym) = SYMBOLS.get() else {
+      return false;
+   };
+   let Some(push) = sym.div_push_any else {
+      return false;
+   };
+   if div.is_null() || sym.str_into_any.is_none() {
+      return false;
+   }
+   let b = Builder { sym };
+   let mut row = inline_row(&b, pieces, 13.0);
+   if lead > 0.0 {
+      b.style_div(&mut row, |s| s.length(s.at.padding[3], gpui_px(lead)));
+   }
+   let mut any = MaybeUninit::<RawAnyElement>::uninit();
+   b.write_any(row, any.as_mut_ptr());
+   // SAFETY: `div` is a live `Div` that `Div::child` just returned, whose
+   // children sit at the decoded offset; `push` moves the element into them.
+   unsafe {
+      let children = div
+         .cast::<u8>()
+         .add(sym.layout.div.children)
+         .cast::<c_void>();
+      push(children, any.as_mut_ptr());
+   }
+   true
+}
+
 // ---------------------------------------------------------------------------
 // Sunbird Categorized Native GPUI Settings Page
 // ---------------------------------------------------------------------------
@@ -1485,6 +1668,7 @@ const DESKTOP_FULL: &[&str] = &[
    "translate",
    "clear-urls",
    "fix-embeds",
+   "platform-indicators",
 ];
 
 const DESKTOP_PARTIAL: &[&str] = &["fakenitro"];
@@ -1999,12 +2183,19 @@ fn render_plugins_tab(
                   );
                },
                Control::Text(val) => {
-                  let shown = if val.is_empty() {
-                     "empty"
-                  } else {
-                     val.as_str()
+                  let count = val.lines().filter(|line| !line.trim().is_empty()).count();
+                  let shown = match (setting.multiline, count) {
+                     (_, 0) => "empty".to_owned(),
+                     (true, 1) => "1 line".to_owned(),
+                     (true, n) => format!("{n} lines"),
+                     (false, _) => val.clone(),
                   };
-                  drawer = b.push_div(drawer, edit_row(shown, val.clone(), FieldKind::Text));
+                  let kind = if setting.multiline {
+                     FieldKind::Lines
+                  } else {
+                     FieldKind::Text
+                  };
+                  drawer = b.push_div(drawer, edit_row(&shown, val.clone(), kind));
                },
                Control::Secret(val) => {
                   let shown = if val.is_empty() { "not set" } else { "set" };

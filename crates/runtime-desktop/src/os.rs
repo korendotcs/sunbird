@@ -21,10 +21,10 @@ pub trait DesktopOs {
 
    /// The calling thread's id as the OS and debuggers show it.
    #[cfg_attr(
-      not(windows),
+      not(any(windows, target_os = "linux")),
       expect(
          dead_code,
-         reason = "phoenix.native.hook, its one reader, is Windows-only for now"
+         reason = "phoenix.native.hook, its one reader, runs on Windows and Linux"
       )
    )]
    fn current_thread_id() -> u32;

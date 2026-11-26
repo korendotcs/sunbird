@@ -66,6 +66,20 @@ pub(crate) fn alloc_exec(at: usize, len: usize) -> Option<usize> {
    (page != libc::MAP_FAILED).then_some(page as usize)
 }
 
+/// Releases a mapping [`alloc_exec`] made at the wrong place.
+#[cfg(all(windows, target_arch = "x86_64"))]
+const fn free_exec(_: usize, _: usize) {
+   // `VirtualAlloc` at an address places the memory there or fails.
+}
+
+/// Releases a mapping [`alloc_exec`] made at the wrong place: the kernel takes
+/// the address as a hint and maps elsewhere when it is taken.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn free_exec(addr: usize, len: usize) {
+   // SAFETY: unmaps the fresh mapping nothing else uses.
+   unsafe { libc::munmap(addr as *mut c_void, len) };
+}
+
 const NT_GNU_BUILD_ID: u32 = 3;
 #[cfg(all(unix, not(target_vendor = "apple")))]
 const PF_X: u32 = 1;
@@ -391,6 +405,14 @@ impl Image<'static> {
 #[cfg(target_vendor = "apple")]
 unsafe extern "C" {
    static mach_task_self_: u32;
+   fn mach_vm_protect(
+      task: u32,
+      address: u64,
+      size: u64,
+      set_maximum: c_int,
+      protection: c_int,
+   ) -> c_int;
+   fn sys_icache_invalidate(start: *mut c_void, len: usize);
    fn vm_region_64(
       task: u32,
       address: *mut usize,
@@ -400,14 +422,6 @@ unsafe extern "C" {
       count: *mut u32,
       object_name: *mut u32,
    ) -> c_int;
-   fn vm_protect(
-      target_task: u32,
-      address: usize,
-      size: usize,
-      set_maximum: c_int,
-      new_protection: c_int,
-   ) -> c_int;
-   fn sys_icache_invalidate(start: *mut c_void, len: usize);
    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
    fn pthread_jit_write_protect_np(enabled: c_int);
 }
@@ -452,42 +466,13 @@ unsafe fn swap_protected(
    page_size: usize,
    restore: &[(usize, c_int)],
 ) -> Result<Vec<usize>, crate::Error> {
-   #[cfg(target_vendor = "apple")]
-   let protect = |page: usize, prot: c_int, make_writable: bool| {
-      const VM_PROT_READ: c_int = 0x01;
-      const VM_PROT_WRITE: c_int = 0x02;
-      const VM_PROT_COPY: c_int = 0x10;
-      let target = if make_writable {
-         // Strip PROT_EXEC for W^X and set VM_PROT_COPY so __TEXT pages with
-         // max_prot r-x can be copied-on-write and patched.
-         (prot & !libc::PROT_EXEC) | VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY
-      } else {
-         prot
-      };
+   let protect = |page: usize, prot: c_int| {
       // SAFETY: `page` is a mapped page the caller looked up.
-      let status = unsafe { vm_protect(mach_task_self_, page, page_size, 0, target) };
-      if status == 0 {
+      if unsafe { libc::mprotect(page as *mut c_void, page_size, prot) } == 0 {
          Ok(())
       } else {
          Err(crate::Error::Protect {
-            addr: page,
-            source: std::io::Error::from_raw_os_error(status),
-         })
-      }
-   };
-   #[cfg(not(target_vendor = "apple"))]
-   let protect = |page: usize, prot: c_int, make_writable: bool| {
-      let target = if make_writable {
-         prot | libc::PROT_WRITE
-      } else {
-         prot
-      };
-      // SAFETY: `page` is a mapped page the caller looked up.
-      if unsafe { libc::mprotect(page as *mut c_void, page_size, target) } == 0 {
-         Ok(())
-      } else {
-         Err(crate::Error::Protect {
-            addr: page,
+            addr:   page,
             source: std::io::Error::last_os_error(),
          })
       }
@@ -497,9 +482,9 @@ unsafe fn swap_protected(
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);
    for (done, &(page, prot)) in restore.iter().enumerate() {
-      if let Err(err) = protect(page, prot, true) {
+      if let Err(err) = make_writable(page, page_size, prot, protect) {
          for &(page, prot) in &restore[..done] {
-            let _ = protect(page, prot, false);
+            let _ = protect(page, prot);
          }
          return Err(err);
       }
@@ -512,14 +497,60 @@ unsafe fn swap_protected(
       })
       .collect();
    for &(page, prot) in restore {
-      let _ = protect(page, prot, false);
+      let _ = protect(page, prot);
       #[cfg(target_vendor = "apple")]
       if prot & libc::PROT_EXEC != 0 {
-         // SAFETY: `page` is a mapped code page we just wrote.
+         // SAFETY: `page` is mapped, and arm64 can fetch stale instructions
+         // until the cache drops them.
          unsafe { sys_icache_invalidate(page as *mut c_void, page_size) };
       }
    }
    Ok(previous)
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn make_writable(
+   page: usize,
+   _page_size: usize,
+   prot: c_int,
+   protect: impl Fn(usize, c_int) -> Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+   protect(page, prot | libc::PROT_WRITE)
+}
+
+/// A signed code page's maximum protection leaves out write, and macOS refuses
+/// a page writable and executable at once, so code is written on a private
+/// copy of the page that is only readable and writable meanwhile.
+#[cfg(target_vendor = "apple")]
+fn make_writable(
+   page: usize,
+   page_size: usize,
+   prot: c_int,
+   protect: impl Fn(usize, c_int) -> Result<(), crate::Error>,
+) -> Result<(), crate::Error> {
+   const VM_PROT_COPY: c_int = 0x10;
+
+   if prot & libc::PROT_EXEC == 0 {
+      return protect(page, prot | libc::PROT_WRITE);
+   }
+   // SAFETY: `page` is a mapped page the caller looked up.
+   let status = unsafe {
+      mach_vm_protect(
+         mach_task_self_,
+         page as u64,
+         page_size as u64,
+         0,
+         libc::PROT_READ | libc::PROT_WRITE | VM_PROT_COPY,
+      )
+   };
+   if status == 0 {
+      Ok(())
+   } else {
+      Err(crate::Error::Protect {
+         addr:   page,
+         source: std::io::Error::other(format!("mach_vm_protect returned {status}")),
+      })
+   }
 }
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
@@ -1122,6 +1153,88 @@ impl Image<'static> {
       unsafe { self.write_code(addr, &jump) }?;
       Ok(trampoline)
    }
+
+   /// Points the one call at `site` to `detour`, through an island within
+   /// reach of the call that runs `prefix` and then jumps to `detour`, and
+   /// returns the call's original target. Other calls to that target stay as
+   /// they are. `prefix` may only touch registers the target does not read,
+   /// like handing a callee-saved register of the caller to `detour`.
+   ///
+   /// The call is a `call rel32`, or a `call [rip + slot]` as ELF builds make,
+   /// which becomes a `call rel32` and a `nop` the call returns onto.
+   ///
+   /// # Safety
+   ///
+   /// `detour` takes the target's arguments plus what `prefix` adds, and no
+   /// thread runs the call while its displacement is written.
+   #[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
+   pub unsafe fn hook_call(
+      &self,
+      site: usize,
+      prefix: &[u8],
+      detour: usize,
+   ) -> Result<usize, crate::Error> {
+      /// `call rel32`.
+      const CALL: u8 = 0xE8;
+      const CALL_LEN: usize = 5;
+      const NOP: u8 = 0x90;
+      /// Windows hands out memory at this granularity.
+      const STEP: usize = 0x1_0000;
+      const REACH: usize = 0x7000_0000;
+
+      let refuse = |message: &str| {
+         crate::Error::Attach {
+            backend: "call",
+            target:  site,
+            message: message.to_owned(),
+         }
+      };
+      let call = self
+         .read(site, 6)
+         .or_else(|| self.read(site, CALL_LEN))
+         .ok_or(crate::Error::Unmapped { addr: site })?;
+      let (len, target) = match call {
+         [CALL, ..] | [0xFF, 0x15, ..] => {
+            crate::x86::call_target(self, call, site).ok_or_else(|| refuse("not a call"))?
+         },
+         _ => return Err(refuse("not a call rel32 or through a slot")),
+      };
+      let next = site + CALL_LEN;
+      let rel_to =
+         |to: usize| i32::try_from(i64::try_from(to).ok()? - i64::try_from(next).ok()?).ok();
+
+      let mut code = prefix.to_vec();
+      code.extend(absolute_jump(detour));
+      // Below the lowest segment, so the module's own pages are skipped.
+      let low = self
+         .segments
+         .iter()
+         .map(|segment| segment.addr)
+         .min()
+         .unwrap_or(site)
+         & !(STEP - 1);
+      let island = (1..REACH / STEP)
+         .filter_map(|k| low.checked_sub(k * STEP))
+         .take_while(|&at| rel_to(at).is_some())
+         .find_map(|at| {
+            let got = alloc_exec(at, code.len())?;
+            if rel_to(got).is_some() {
+               return Some(got);
+            }
+            free_exec(got, code.len());
+            None
+         })
+         .ok_or_else(|| refuse("no memory within reach of the call"))?;
+      // SAFETY: `island` holds `code.len()` writable bytes.
+      unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), island as *mut u8, code.len()) };
+      let rel = rel_to(island).ok_or_else(|| refuse("the island is out of reach"))?;
+      let mut patch = vec![CALL];
+      patch.extend(rel.to_le_bytes());
+      patch.resize(len, NOP);
+      // SAFETY: forwarded from the caller.
+      unsafe { self.write_code(site, &patch) }?;
+      Ok(target)
+   }
 }
 
 impl Image<'_> {
@@ -1454,6 +1567,44 @@ fn last_at_or_below(
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   // `mov w0, #1; ret` on a 16 KB page of its own, since the page loses
+   // execute while it is written and must not hold the writer.
+   #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
+   std::arch::global_asm!(
+      ".section __TEXT,__phoenix_test,regular,pure_instructions",
+      ".p2align 14",
+      ".globl _phoenix_test_answer",
+      ".private_extern _phoenix_test_answer",
+      "_phoenix_test_answer:",
+      "mov w0, #1",
+      "ret",
+      ".p2align 14",
+      ".text",
+   );
+
+   #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
+   #[test]
+   fn write_code_rewrites_a_signed_function() {
+      unsafe extern "C" {
+         fn phoenix_test_answer() -> u32;
+      }
+      /// `mov w0, #2; ret`
+      const TWO: [u8; 8] = [0x40, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6];
+
+      let call = std::hint::black_box(phoenix_test_answer as unsafe extern "C" fn() -> u32);
+      let addr = call as usize;
+      // SAFETY: the test binary's own images.
+      let images = unsafe { Image::loaded() };
+      let image = images
+         .iter()
+         .find(|image| image.is_code(addr))
+         .expect("the test's own text");
+      // SAFETY: nothing else calls `phoenix_test_answer`.
+      unsafe { image.write_code(addr, &TWO) }.expect("write_code");
+      // SAFETY: the bytes just written.
+      assert_eq!(unsafe { call() }, 2);
+   }
 
    #[test]
    fn function_bounds_read_the_fde_range() {

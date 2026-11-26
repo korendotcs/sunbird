@@ -250,7 +250,9 @@ pub fn apply() {
       });
       let Some(update) = update else {
          log::info!("update apply: up to date ({VERSION})");
-         BUSY.store(false, Ordering::Release);
+         // `finish` also clears the last status line and redraws the page;
+         // releasing only the slot left "Updating..." on screen for good.
+         finish(None);
          crate::toast("Sunbird is up to date");
          return;
       };
@@ -271,13 +273,13 @@ pub fn apply() {
          }
       }
       let mut updated_plugins = Vec::new();
+      let mut failed = Vec::new();
       if !update.plugins.is_empty() {
          set_status(Some(format!(
             "Updating {} plugin{}...",
             update.plugins.len(),
             if update.plugins.len() == 1 { "" } else { "s" }
          )));
-         let mut failed = Vec::new();
          for name in &update.plugins {
             let expected_crc = update.plugin_crcs.get(name).copied();
             match update_plugin(name, expected_crc) {
@@ -306,20 +308,23 @@ pub fn apply() {
                }
             }
          }
-         if !failed.is_empty() && update.loader.is_none() {
-            let msg = format!("Plugin update failed: {}", failed.join("; "));
-            set_status(Some(msg.clone()));
-            BUSY.store(false, Ordering::Release);
-            crate::toast(&msg);
-            return;
-         }
       }
 
-      // Plugin-only OTA update completed cleanly.
-      set_status(None);
+      // A failed plugin used to go unreported whenever the loader update below
+      // still had to run, since only `update.loader.is_none()` printed it.
+      // The slot is released either way, and the failure keeps its line.
       BUSY.store(false, Ordering::Release);
-      crate::refresh_settings();
-      if let Some(platform) = crate::platform() {
+      if failed.is_empty() {
+         set_status(None);
+      } else {
+         let msg = format!("Plugin update failed: {}", failed.join("; "));
+         log::error!("{msg}");
+         set_status(Some(msg.clone()));
+         crate::toast(&msg);
+      }
+      if !updated_plugins.is_empty()
+         && let Some(platform) = crate::platform()
+      {
          platform.notify(Notice::PluginsUpdated(&updated_plugins));
       }
    });

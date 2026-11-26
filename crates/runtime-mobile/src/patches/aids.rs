@@ -38,3 +38,14 @@ pub fn message_part(aid: &str) -> Option<(MessagePart, &str)> {
 pub fn message_id(aid: &str) -> Option<&str> {
    message_part(aid).map(|(_, id)| id)
 }
+
+/// A row in a channel's member list, `channel.details.member:<user id>`.
+pub const MEMBER_ROW_PREFIX: &str = "channel.details.member:";
+/// A row in the DM list, `dm.row:<channel id>`.
+pub const DM_ROW_PREFIX: &str = "dm.row:";
+
+/// The snowflake in `aid` after `prefix`.
+pub fn snowflake<'a>(aid: &'a str, prefix: &str) -> Option<&'a str> {
+   let id = aid.strip_prefix(prefix)?;
+   (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())).then_some(id)
+}

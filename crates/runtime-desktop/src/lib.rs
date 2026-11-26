@@ -1,5 +1,6 @@
 //! phoenix on Desktop Phoenix: the access gate, the HTTP transport hooks, the
-//! Sunbird pages in User Settings, message accessories and the tray.
+//! Sunbird pages in User Settings, message accessories, member list
+//! decorations and the tray.
 
 #![cfg(any(
    windows,
@@ -14,15 +15,27 @@ mod badges;
 #[cfg(target_os = "macos")]
 mod captcha;
 #[cfg(target_arch = "x86_64")]
+mod composer;
+#[cfg(target_arch = "x86_64")]
 mod context_menu;
 #[cfg(target_arch = "x86_64")]
 mod discord;
 #[cfg(target_arch = "x86_64")]
+mod double_click;
+#[cfg(target_arch = "x86_64")]
 mod emoji;
 mod fetch;
+#[cfg(target_arch = "x86_64")]
+mod gateway_send;
 mod gpui;
 #[cfg(target_arch = "x86_64")]
+mod headers;
+#[cfg(target_arch = "x86_64")]
+mod icons;
+#[cfg(target_arch = "x86_64")]
 mod js;
+#[cfg(target_arch = "x86_64")]
+mod members;
 #[cfg(target_arch = "x86_64")]
 mod message;
 #[cfg(target_arch = "x86_64")]
@@ -108,11 +121,18 @@ pub fn prepare() -> Result<(), Error> {
    #[cfg(target_arch = "x86_64")]
    {
       modal::install(&image);
+      // Before accessories hooks `MessageRow::render`, whose prologue the header
+      // locators check.
+      let header = headers::locate(&image);
       accessories::install(&image);
+      members::install(&image);
+      headers::install(&image, header);
+      icons::install(&image);
       context_menu::install(&image);
       message::install(&image);
       badges::install(&image);
       emoji::install(&image);
+      composer::install(&image);
    }
    <os::Os as os::DesktopOs>::install(&image);
    let registry = phoenix_runtime::hook(&image);
@@ -120,6 +140,7 @@ pub fn prepare() -> Result<(), Error> {
    {
       if registry.is_ok() {
          discord::install(&image);
+         gateway_send::install(&image);
          accessories::install_optimistic_delete(&image);
       }
       // The index is tens of MB and nothing reads it after startup.
@@ -149,7 +170,10 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    let image = phoenix_runtime::target()?;
    let registry = phoenix_runtime::hook(&image)?;
    #[cfg(target_arch = "x86_64")]
-   discord::install(&image);
+   {
+      discord::install(&image);
+      gateway_send::install(&image);
+   }
    phoenix_runtime::start_hooked(&Desktop, image, registry, home, bundled)
 }
 
@@ -160,30 +184,51 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
 /// code.
 fn open_access_gate(image: &Image<'static>) {
    #[cfg(target_arch = "x86_64")]
-   let (access, patch): (_, &[u8]) = (
-      phoenix_sigs::desktop::access_gate(image),
+   {
+      let access = match phoenix_sigs::desktop::access_gate(image) {
+         Ok(access) => access,
+         Err(err) => {
+            log::warn!("access gate: {err}, leaving it");
+            return;
+         },
+      };
       // `mov al, 2; ret`
-      &[0xB0, 0x02, 0xC3],
-   );
+      // SAFETY: Discord's own code, written from `DllMain` or the constructor
+      // before it runs.
+      match unsafe { image.write_code(access, &[0xB0, 0x02, 0xC3]) } {
+         Ok(()) => log::info!("access gate: open"),
+         Err(err) => log::error!("access gate: {err}"),
+      }
+   }
    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-   let (access, patch): (_, &[u8]) = (
-      phoenix_sigs::macos::access_gate(image),
-      // `mov w0, #0; ret`
-      &[0x00, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6],
-   );
+   {
+      /// `mov w0, #2; ret`
+      const NO_GATE: [u8; 8] = [0x40, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6];
+      /// `mov w0, #0; ret`
+      const NOT_ENFORCED: [u8; 8] = [0x00, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6];
 
-   let access = match access {
-      Ok(access) => access,
-      Err(err) => {
-         log::warn!("access gate: {err}, leaving it");
-         return;
-      },
-   };
-   // SAFETY: Discord's own code, written from `DllMain` or the constructor
-   // before it runs.
-   match unsafe { image.write_code(access, patch) } {
-      Ok(()) => log::info!("access gate: open"),
-      Err(err) => log::error!("access gate: {err}"),
+      let access = match phoenix_sigs::macos::access_gate(image) {
+         Ok(access) => access,
+         Err(err) => {
+            log::warn!("access gate: {err}, leaving it");
+            return;
+         },
+      };
+      // Located before `read` is rewritten, since it is found through it.
+      let enforced = phoenix_sigs::macos::access_enforced(image, access);
+      // SAFETY: Discord's own code, written from the constructor before it runs.
+      match unsafe { image.write_code(access, &NO_GATE) } {
+         Ok(()) => log::info!("access gate: open"),
+         Err(err) => log::error!("access gate: {err}"),
+      }
+      // `push_access` asks `enforced` itself and drops every message alert for
+      // a gated account, so notifications and their sounds need this too.
+      // SAFETY: as above.
+      match enforced.map(|enforced| unsafe { image.write_code(enforced, &NOT_ENFORCED) }) {
+         Ok(Ok(())) => log::info!("access gate: not enforced, message alerts are on"),
+         Ok(Err(err)) => log::error!("access gate: {err}"),
+         Err(err) => log::warn!("{err}, message alerts stay off"),
+      }
    }
 }
 
@@ -287,15 +332,17 @@ impl Platform for Desktop {
          return;
       };
       let _ = std::fs::create_dir_all(state.plugins_dir());
-      remote::set_flag(true);
-      // Desktop keeps the shell on, so any local process could reach `/eval`
-      // and the session; only holders of this start's token get in.
+      // Any local process could reach the shell's `/eval` and the session, so
+      // it only listens once DevTools is opened, and only for holders of this
+      // start's token. `SUNBIRD_DEVTOOLS` starts it at launch, for `dev.ps1`.
       remote::require_token(&state.plugins_dir().with_file_name("debug-shell-token"));
-      remote::ensure_started();
+      if std::env::var_os("SUNBIRD_DEVTOOLS").is_some() {
+         start_shell();
+      }
       phoenix_ui_desktop::start_tray(phoenix_ui_desktop::TrayConfig {
-         dashboard_url: remote::dashboard_url(),
-         plugins_dir: state.plugins_dir(),
-         on_reload_all: Some(Arc::new(phoenix_runtime::reload_all)),
+         devtools_url:     Arc::new(start_shell),
+         plugins_dir:      state.plugins_dir(),
+         on_reload_all:    Some(Arc::new(phoenix_runtime::reload_all)),
          on_check_updates: Some(Arc::new(phoenix_runtime::update::check_now)),
       });
       phoenix_ui_desktop::notify(
@@ -363,6 +410,13 @@ impl Platform for Desktop {
    fn routes(&self) -> &'static str {
       ", GET /ui, POST /ui/devtools, POST /ui/{choose,sheet}"
    }
+}
+
+/// Starts the debug shell if it isn't running and returns the `DevTools` URL.
+fn start_shell() -> String {
+   remote::set_flag(true);
+   remote::ensure_started();
+   remote::dashboard_url()
 }
 
 #[cfg(not(target_arch = "x86_64"))]

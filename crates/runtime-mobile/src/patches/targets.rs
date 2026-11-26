@@ -53,10 +53,14 @@ pub enum Target {
    Tab,
    /// The pages of profile tabs, after the profile's own pages.
    TabPage,
+   /// After a user's name in the member list and the DM list.
+   Member,
+   /// After the author's name in a message header.
+   Author,
 }
 
 impl Target {
-   pub const ALL: [Self; 8] = [
+   pub const ALL: [Self; 10] = [
       Self::Header,
       Self::Composer,
       Self::Content,
@@ -65,6 +69,8 @@ impl Target {
       Self::Profile,
       Self::Tab,
       Self::TabPage,
+      Self::Member,
+      Self::Author,
    ];
 
    /// The target whose contributions this one draws.
@@ -83,6 +89,11 @@ impl Target {
          Self::Timestamp => matches!(message_part(aid), Some((MessagePart::Timestamp, _))),
          Self::Action => aid == aids::MESSAGE_ACTIONS,
          Self::Profile | Self::Tab | Self::TabPage => aid == aids::PROFILE_TAB_PAGES,
+         Self::Member => {
+            aids::snowflake(aid, aids::MEMBER_ROW_PREFIX).is_some()
+               || aids::snowflake(aid, aids::DM_ROW_PREFIX).is_some()
+         },
+         Self::Author => matches!(message_part(aid), Some((MessagePart::Author, _))),
       }
    }
 
@@ -153,6 +164,14 @@ impl Target {
                place:  Place::User(seen.profile_user.clone()),
             })
          },
+         Self::Member => {
+            let place = match aids::snowflake(aid, aids::MEMBER_ROW_PREFIX) {
+               Some(user) => Place::User(Some(user.to_owned())),
+               None => Place::Channel(aids::snowflake(aid, aids::DM_ROW_PREFIX)?.to_owned()),
+            };
+            after(mirror, member_name(mirror, id)?.0, place)
+         },
+         Self::Author => after(mirror, id, Place::Message(message_part(aid)?.1.to_owned())),
       }
    }
 
@@ -160,9 +179,59 @@ impl Target {
    pub const fn evaluates(self) -> bool {
       matches!(
          self,
-         Self::Content | Self::Timestamp | Self::Profile | Self::TabPage
+         Self::Content
+            | Self::Timestamp
+            | Self::Profile
+            | Self::TabPage
+            | Self::Member
+            | Self::Author
       )
    }
+
+   /// The name in DM row `id` when it stretches across its row, as it does
+   /// without tags, which would leave decorations at the row's far end.
+   pub fn stretched_name(mirror: &Mirror, id: i32, aid: &str) -> Option<i32> {
+      aids::snowflake(aid, aids::DM_ROW_PREFIX)?;
+      match member_name(mirror, id)? {
+         (name, 2) => Some(name),
+         _ => None,
+      }
+   }
+
+   /// Whether this target's places are about a user, which its plugins get
+   /// as `userId`.
+   pub const fn decorates(self) -> bool {
+      matches!(self, Self::Member | Self::Author)
+   }
+}
+
+/// The name in member or DM row `id`, the first leaf of its name column,
+/// and how deep it is there.
+///
+/// `row > [avatar, column > [names > [name, tags…], …]]`, where a DM with
+/// tags has its names one row further down, and one without has the name
+/// right in the row with the time.
+fn member_name(mirror: &Mirror, id: i32) -> Option<(i32, usize)> {
+   let mut name = *mirror.kids(id).get(1)?;
+   for depth in 0..4 {
+      let Some(first) = mirror.kids(name).first() else {
+         return Some((name, depth));
+      };
+      name = *first;
+   }
+   None
+}
+
+/// Right after `node`, among its siblings.
+fn after(mirror: &Mirror, node: i32, place: Place) -> Option<Placement> {
+   let parent = mirror.parent(node)?;
+   let siblings = mirror.kids(parent);
+   let at = siblings.iter().position(|sibling| *sibling == node)?;
+   Some(Placement {
+      parent,
+      before: siblings.get(at + 1).copied(),
+      place,
+   })
 }
 
 /// The row holding the tabs of the profile whose pages are `pager`, and its
@@ -271,6 +340,7 @@ impl Templates {
             text:  title.to_owned(),
             color: None,
             tint:  None,
+            icons: Vec::new(),
          });
          head.set(Prop::MARGIN, Some(Value::Rect([4.0, 0.0, 4.0, 8.0])));
          head.set(prop!("fontWeight"), Some(Value::I32(700)));
@@ -454,6 +524,17 @@ impl Templates {
                .collect()
          },
          Target::Action => self.action_group(contributions, place, outcome),
+         Target::Member | Target::Author => {
+            contributions
+               .iter()
+               .filter_map(|contribution| {
+                  let Some(Outcome::Text(Some(rendered))) = outcome(contribution) else {
+                     return None;
+                  };
+                  decoration(&rendered, target == Target::Member)
+               })
+               .collect()
+         },
          Target::Tab => {
             let Some(tab) = &self.tab else {
                return Vec::new();
@@ -491,6 +572,7 @@ impl Templates {
                      text:  contribution.label.clone(),
                      color: None,
                      tint:  None,
+                     icons: Vec::new(),
                   });
                   head.set(
                      Prop::ACCESSIBILITY_LABEL,
@@ -727,6 +809,52 @@ fn first_text_color(node: &Node) -> Option<i64> {
       }
    }
    node.kids.iter().find_map(first_text_color)
+}
+
+/// A decoration's icons in a row, or with `text` and no icons, its text.
+fn decoration(rendered: &Rendered, text: bool) -> Option<Draft> {
+   const SIZE: f64 = 16.0;
+   let draft = |kind, props| {
+      Draft {
+         kind,
+         props,
+         kids: Vec::new(),
+         press: None,
+         src: None,
+      }
+   };
+   if rendered.icons.is_empty() {
+      if !text || rendered.text.is_empty() {
+         return None;
+      }
+      let mut props = vec![
+         (Prop::TEXT, Value::Str(rendered.text.clone())),
+         (Prop::FONT_SIZE, Value::F64(12.0)),
+         (prop!("maxLines"), Value::I32(1)),
+      ];
+      if let Some(color) = rendered.color {
+         props.push((Prop::COLOR, Value::I64(color)));
+      }
+      return Some(draft(ViewKind::Text, props));
+   }
+   let mut row = draft(ViewKind::View, vec![
+      (prop!("direction"), Value::Str("row".to_owned())),
+      (prop!("gap"), Value::F64(2.0)),
+      (prop!("align"), Value::Str("center".to_owned())),
+   ]);
+   row.kids = rendered
+      .icons
+      .iter()
+      .map(|uri| {
+         draft(ViewKind::Image, vec![
+            (Prop::URI, Value::Str(uri.clone())),
+            (prop!("width"), Value::F64(SIZE)),
+            (Prop::HEIGHT, Value::F64(SIZE)),
+            (prop!("scale"), Value::Str("fit".to_owned())),
+         ])
+      })
+      .collect();
+   Some(row)
 }
 
 pub fn text(props: &Props, rendered: &Rendered) -> Draft {

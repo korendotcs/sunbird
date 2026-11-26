@@ -1,7 +1,6 @@
 use std::{
    ffi::c_void,
    path::PathBuf,
-   process::Command,
    ptr,
    sync::{
       Mutex,
@@ -29,18 +28,12 @@ const SW_SHOWNORMAL: i32 = 1;
 const WM_NULL: u32 = 0x0000;
 const WM_DESTROY: u32 = 0x0002;
 const WM_COMMAND: u32 = 0x0111;
-const WM_HOTKEY: u32 = 0x0312;
 const WM_USER: u32 = 0x0400;
 const WM_TRAY: u32 = WM_USER + 1;
 const WM_LBUTTONUP: usize = 0x0202;
 const WM_LBUTTONDBLCLK: usize = 0x0203;
 const WM_RBUTTONUP: usize = 0x0205;
 const NIN_BALLOONUSERCLICK: usize = 0x0405;
-
-const MOD_CONTROL: u32 = 0x0002;
-const MOD_SHIFT: u32 = 0x0004;
-const MOD_NOREPEAT: u32 = 0x4000;
-const HOTKEY_ID: i32 = 0x5342;
 
 const NIM_ADD: u32 = 0x0000_0000;
 const NIM_MODIFY: u32 = 0x0000_0001;
@@ -57,7 +50,6 @@ const TPM_RIGHTBUTTON: u32 = 0x0002;
 const TPM_NONOTIFY: u32 = 0x0080;
 const TPM_RETURNCMD: u32 = 0x0100;
 
-const ID_OPEN_SETTINGS: usize = 1001;
 const ID_OPEN_DEVTOOLS: usize = 1006;
 const ID_RELOAD_ALL: usize = 1002;
 const ID_CHECK_UPDATES: usize = 1003;
@@ -197,8 +189,6 @@ unsafe extern "system" {
    fn DestroyMenu(menu: *mut c_void) -> i32;
    fn GetCursorPos(pt: *mut Point) -> i32;
    fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
-   fn RegisterHotKey(hwnd: *mut c_void, id: i32, modifiers: u32, vk: u32) -> i32;
-   fn UnregisterHotKey(hwnd: *mut c_void, id: i32) -> i32;
    fn PostQuitMessage(code: i32);
 }
 
@@ -415,10 +405,7 @@ unsafe fn add_tray_icon(hwnd: *mut c_void, icon: *mut c_void) -> bool {
    let mut nid = empty_nid(hwnd);
    nid.u_flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
    nid.h_icon = icon;
-   fill_wide(
-      &mut nid.sz_tip,
-      "Sunbird — Click or press Ctrl+Shift+U for Settings",
-   );
+   fill_wide(&mut nid.sz_tip, "Sunbird — Click for DevTools");
    // SAFETY: `hwnd` and `icon` are live Win32 handles on the tray thread.
    unsafe { Shell_NotifyIconW(NIM_ADD, &raw mut nid) != 0 }
 }
@@ -498,16 +485,6 @@ fn run_tray_loop() {
       }
       TRAY_HWND.store(hwnd as usize, Ordering::Release);
 
-      if RegisterHotKey(
-         hwnd,
-         HOTKEY_ID,
-         MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
-         u32::from(b'U'),
-      ) == 0
-      {
-         log::info!("tray: Ctrl+Shift+U hotkey already in use by another app");
-      }
-
       // Flush any startup notifications queued before the tray HWND was ready.
       let pending = std::mem::take(
          &mut *PENDING_BALLOONS
@@ -531,7 +508,6 @@ fn run_tray_loop() {
          DispatchMessageW(&raw const msg);
       }
 
-      UnregisterHotKey(hwnd, HOTKEY_ID);
       TRAY_HWND.store(0, Ordering::Release);
       let mut del = empty_nid(hwnd);
       Shell_NotifyIconW(NIM_DELETE, &raw mut del);
@@ -571,7 +547,6 @@ fn balloon(title: &str, body: &str) {
 
 fn run_menu_action(cmd: usize) {
    let action = match cmd {
-      ID_OPEN_SETTINGS => TrayAction::OpenSettings,
       ID_OPEN_DEVTOOLS => TrayAction::OpenDevtools,
       ID_RELOAD_ALL => TrayAction::ReloadAll,
       ID_CHECK_UPDATES => TrayAction::CheckUpdates,
@@ -606,20 +581,18 @@ unsafe extern "system" fn tray_wnd_proc(
          )]
          let event = (lparam as usize) & 0xFFFF;
          match event {
-            WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_BALLOONUSERCLICK => crate::open_settings(),
+            WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_BALLOONUSERCLICK => crate::open_devtools(),
             WM_RBUTTONUP => {
                // SAFETY: Win32 popup menu owned and destroyed in this scope.
                unsafe {
                   let menu = CreatePopupMenu();
                   if !menu.is_null() {
-                     let open_lbl = wide("Open Sunbird Settings\tCtrl+Shift+U");
-                     let devtools_lbl = wide("Open DevTools (Console)\tCtrl+Shift+I");
+                     let devtools_lbl = wide("Open DevTools\tCtrl+Shift+I");
                      let reload_lbl = wide("Reload All Plugins");
                      let update_lbl = wide("Check for Updates");
-                     let copy_lbl = wide("Copy Dashboard URL");
+                     let copy_lbl = wide("Copy DevTools URL");
                      let folder_lbl = wide("Open Plugins Folder");
 
-                     AppendMenuW(menu, MF_STRING, ID_OPEN_SETTINGS, open_lbl.as_ptr());
                      AppendMenuW(menu, MF_STRING, ID_OPEN_DEVTOOLS, devtools_lbl.as_ptr());
                      AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
                      AppendMenuW(menu, MF_STRING, ID_RELOAD_ALL, reload_lbl.as_ptr());
@@ -652,12 +625,6 @@ unsafe extern "system" fn tray_wnd_proc(
                }
             },
             _ => {},
-         }
-         0
-      },
-      WM_HOTKEY => {
-         if wparam == usize::try_from(HOTKEY_ID).unwrap_or(0) {
-            crate::open_settings();
          }
          0
       },
@@ -798,17 +765,6 @@ impl DesktopHost for Host {
 
    fn open(target: &str) -> Result<(), Error> {
       open(target)
-   }
-
-   fn app_browser() -> Option<Command> {
-      [
-         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-      ]
-      .into_iter()
-      .map(PathBuf::from)
-      .find(|path| path.is_file())
-      .map(Command::new)
    }
 
    fn pick_js_path() -> Option<PathBuf> {

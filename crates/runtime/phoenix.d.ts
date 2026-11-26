@@ -894,11 +894,45 @@ declare namespace Phoenix {
     guildEmojisUpdate: GuildEmojisUpdate;
   }
 
+  /// Outgoing Voice State Update payload (gateway op 4).
+  interface VoiceStateUpdate {
+    guild_id: string | null;
+    channel_id: string | null;
+    self_mute: boolean;
+    self_deaf: boolean;
+    self_video?: boolean;
+    flags?: number;
+    preferred_region?: string | null;
+    preferred_regions?: string[];
+    [key: string]: unknown;
+  }
+
+  /// Outgoing gateway `d` payload types by opcode, for `phoenix.gateway.onSend`.
+  interface GatewaySendPayloads {
+    3: Record<string, unknown>;
+    4: VoiceStateUpdate;
+  }
+
+  interface GatewaySendApi {
+    /// Intercepts outgoing gateway frames for numeric opcode `op` (desktop only).
+    /// Receives the frame's `d` payload; return a replacement payload, `false` to
+    /// drop the frame, or nothing to pass the (possibly mutated) payload on.
+    /// Identify (2) and Resume (6) carry credentials and cannot be hooked.
+    onSend<Op extends keyof GatewaySendPayloads>(
+      op: Op,
+      handler: (payload: GatewaySendPayloads[Op]) => GatewaySendPayloads[Op] | false | void
+    ): Remover;
+    onSend<P = unknown>(
+      op: number,
+      handler: (payload: P) => P | false | void
+    ): Remover;
+  }
+
   /// One handle per entry in the client's gateway registry, read from the
   /// running binary. Events without a payload type here are `Sig<unknown>`, and
   /// any event can be missing from a given build.
-  type Gateway = { readonly [E in keyof GatewayPayloads]: Sig<GatewayPayloads[E]> } & {
-    readonly [event: string]: Sig<unknown> | undefined;
+  type Gateway = GatewaySendApi & { readonly [E in keyof GatewayPayloads]: Sig<GatewayPayloads[E]> } & {
+    readonly [event: string]: Sig<unknown> | GatewaySendApi["onSend"] | undefined;
   };
 
   interface Hooks<P> {
@@ -933,7 +967,13 @@ declare namespace Phoenix {
 
   type SettingSpec =
     | (SpecBase & { type: "switch"; default?: boolean; onChange?(value: boolean): void })
-    | (SpecBase & { type: "text"; default?: string; onChange?(value: string): void })
+    | (SpecBase & {
+        type: "text";
+        default?: string;
+        /// Edited over several lines, for lists like one rule per line. Desktop only for now.
+        multiline?: boolean;
+        onChange?(value: string): void;
+      })
     /// Text shown masked, and replaced with `[redacted]` in the plugin's log lines.
     | (SpecBase & { type: "secret"; default?: string; onChange?(value: string): void })
     /// One of a fixed list, shown as rows with a checkmark. Defaults to the first option.
@@ -1185,6 +1225,9 @@ declare namespace Phoenix {
     readonly channelId?: string | null;
     readonly currentUserId?: string | null;
     readonly message?: Message;
+    /// Desktop, on `rowDoubleTap`: presses the row's message menu item `action`, like
+    /// `"message.actions.reply"`, without showing the menu.
+    readonly press?: (action: string) => void;
   }
 
   interface PropPatchOptions {
@@ -1202,21 +1245,32 @@ declare namespace Phoenix {
     userId?: string;
   }
 
+  /// An SVG icon: its shape is filled with `color` (32-bit ARGB), whatever fills the source has.
+  /// Android and iOS draw no SVG and show the image at `uri` (PNG, WebP or a `data:` URI) as it is,
+  /// so it carries its own color there.
+  interface RenderedIcon {
+    svg: string;
+    color?: number;
+    uri?: string;
+  }
+
   /// Text a `render` returns: plain, colored (32-bit ARGB), or nothing. Under a message's content,
   /// `tint` also colors the message's author and text (32-bit ARGB); `text` may then be empty.
+  /// `icons` are drawn in place of `text` where the client can draw them (member and header
+  /// decorations), and `text` shows everywhere else.
   type Rendered =
     | string
-    | { text?: string; color?: number; tint?: number }
+    | { text?: string; color?: number; tint?: number; icons?: RenderedIcon[] }
     | null
     | undefined
     | false;
 
   /// Undoes a registration. `update` draws it again, asking the plugin anew; for a message
-  /// accessory, `update(messageId)` redraws only that message, and for a profile tab,
-  /// `update(userId)` only that profile's page.
+  /// accessory, `update(messageId)` redraws only that message, and for a profile tab or a member
+  /// decoration, `update(userId)` only that user's.
   interface Remover {
     (): void;
-    update?(messageId?: string): void;
+    update?(id?: string): void;
   }
 
   /// A pressable piece of text, or plain text without `onPress`. `color` (32-bit ARGB) wins over
@@ -1331,6 +1385,20 @@ declare namespace Phoenix {
       priority?: number;
       render(ctx: MessageContext): Rendered | Promise<Rendered>;
     }): Remover;
+    /// Text or icons after a user's name in the member list and on their DM in the DM list.
+    /// Absent on runtimes from before it. It runs once per user, and the result is kept until
+    /// `update(userId)`.
+    addMemberDecoration?(options: {
+      priority?: number;
+      render(ctx: { userId: string }): Rendered;
+    }): Remover;
+    /// Icons right after the author's name in message headers. Absent on runtimes from before it.
+    /// Only `icons` are drawn. Like `addMemberDecoration`, it runs once per author and the result
+    /// is kept until `update(userId)`.
+    addMessageHeaderDecoration?(options: {
+      priority?: number;
+      render(ctx: { userId: string }): Rendered;
+    }): Remover;
     /// A row in the message long-press menu, above Delete. The menu closes on press.
     addMessageAction(options: {
       label: string;
@@ -1377,7 +1445,7 @@ declare namespace Phoenix {
     openPage(options: { title: string; sections: PageSection[] }): PageHandle;
     /// Hides every Phoenix view matching `accessibilityId` (e.g. `"composer.gift"` or
     /// `"Record Voice Message"`) by omitting it from its parent's child list. Call the returned
-    /// function to restore it.
+    /// function to restore it. Desktop only knows `"composer.gift"`.
     hide(accessibilityId: string): Remover;
     /// Observes or intercepts any Phoenix view event (e.g. `"rowDoubleTap"`, `"press"`),
     /// filtered by event name in Rust. With `intercept: true`, return `false` to pass the event

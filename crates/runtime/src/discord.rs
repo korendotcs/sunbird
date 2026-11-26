@@ -50,6 +50,8 @@ pub enum DiscordError {
    Open { message: String },
    #[error("authorize: the user did not authorize in {} minutes", AUTHORIZE_TIMEOUT.as_secs() / 60)]
    NotAuthorized,
+   #[error("authorize: the user declined")]
+   Declined,
    #[error("phoenix has not started")]
    NotStarted,
 }

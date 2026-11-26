@@ -90,6 +90,8 @@ pub struct Definition<'js> {
    pub title:       String,
    pub description: Option<String>,
    pub kind:        Kind<'js>,
+   /// A text setting edited over several lines.
+   pub multiline:   bool,
    on_change:       Option<Function<'js>>,
 }
 
@@ -240,6 +242,7 @@ fn define<'js>(
       definitions.push(Definition {
          title: spec.get("title")?,
          description: spec.get("description")?,
+         multiline: spec.get::<_, Option<bool>>("multiline")?.unwrap_or_default(),
          on_change: spec.get("onChange")?,
          kind,
          key,

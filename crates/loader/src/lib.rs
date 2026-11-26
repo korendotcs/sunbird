@@ -1,6 +1,6 @@
 //! `libphoenix.so` / `phoenix.dll`, injected through `DT_NEEDED` on Android,
-//! as a dylib on iOS, or loaded into Desktop Phoenix on Windows and, through
-//! `LD_PRELOAD`, on Linux.
+//! as a dylib on iOS, or loaded into Desktop Phoenix on Windows, through
+//! `LD_PRELOAD` on Linux and through `DYLD_INSERT_LIBRARIES` on macOS.
 //!
 //! On Unix the constructor runs once the host library is mapped and relocated.
 //! Desktop hooks Discord synchronously, from `DllMain` or the constructor, then

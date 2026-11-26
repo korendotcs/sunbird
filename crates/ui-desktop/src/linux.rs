@@ -21,12 +21,10 @@ use crate::{
    DesktopHost,
    Error,
    TrayAction,
-   config,
-   spawn_reaped,
 };
 
-/// The tray icon as an AppIndicator (`StatusNotifierItem`, which KDE shows
-/// natively and GNOME with its AppIndicator extension), run by the system
+/// The tray icon as an `AppIndicator` (`StatusNotifierItem`, which KDE shows
+/// natively and GNOME with its `AppIndicator` extension), run by the system
 /// Python's GTK bindings so Discord's process loads no GTK. Takes the icon,
 /// then one label per [`TrayAction::MENU`] entry, empty for a separator.
 /// Prints the index of each clicked entry and exits when its stdin closes,
@@ -56,21 +54,6 @@ GLib.io_add_watch(0, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, lambda *_: Gtk.main
 Gtk.main()
 "#;
 
-const APP_BROWSERS: [&str; 6] = [
-   "chromium",
-   "chromium-browser",
-   "google-chrome",
-   "brave",
-   "brave-browser",
-   "microsoft-edge",
-];
-
-fn on_path(name: &str) -> Option<PathBuf> {
-   env::split_paths(&env::var_os("PATH")?)
-      .map(|dir| dir.join(name))
-      .find(|path| path.is_file())
-}
-
 fn pipe_to(mut command: Command, text: &str) -> bool {
    let Ok(mut child) = command
       .stdin(Stdio::piped())
@@ -85,6 +68,20 @@ fn pipe_to(mut command: Command, text: &str) -> bool {
       .take()
       .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
    child.wait().is_ok_and(|status| status.success()) && written
+}
+
+/// Spawns `command` and waits for it on a background thread, so it never
+/// lingers as a zombie on Unix.
+fn spawn_reaped(command: &mut Command) -> Result<(), Error> {
+   let mut child = command.spawn().map_err(|err| {
+      Error::Platform {
+         message: format!("{}: {err}", command.get_program().display()),
+      }
+   })?;
+   let _ = thread::Builder::new()
+      .name("sunbird-reap".to_owned())
+      .spawn(move || child.wait());
+   Ok(())
 }
 
 pub struct Host;
@@ -111,21 +108,6 @@ impl DesktopHost for Host {
 
    fn open(target: &str) -> Result<(), Error> {
       spawn_reaped(Command::new("xdg-open").arg(target))
-   }
-
-   fn app_browser() -> Option<Command> {
-      // A snap browser can't use a profile in a hidden directory of $HOME,
-      // and fails after spawning, so the plain URL fallback never runs.
-      APP_BROWSERS
-         .into_iter()
-         .filter_map(on_path)
-         .find(|path| {
-            !path.starts_with("/snap/")
-               && path
-                  .canonicalize()
-                  .is_ok_and(|real| real.file_name().is_none_or(|name| name != "snap"))
-         })
-         .map(Command::new)
    }
 
    fn pick_js_path() -> Option<PathBuf> {
@@ -165,16 +147,13 @@ impl DesktopHost for Host {
       static STARTED: Once = Once::new();
       STARTED.call_once(|| {
          if let Err(err) = start_indicator() {
-            log::info!(
-               "tray: {err}, Sunbird Settings is at {}",
-               config().map_or("", |config| &config.dashboard_url)
-            );
+            log::info!("tray: {err}, press Ctrl+Shift+I in Discord for Sunbird DevTools");
          }
       });
    }
 }
 
-/// Discord's own icon from its AppImage or package, else its icon name.
+/// Discord's own icon from its `AppImage` or package, else its icon name.
 fn icon() -> String {
    env::current_exe()
       .ok()
@@ -228,9 +207,8 @@ fn start_indicator() -> Result<(), Error> {
          drop(stdin);
          if child.wait().is_ok_and(|status| !status.success()) {
             log::info!(
-               "tray: needs python3 with GTK 3 and AppIndicator bindings; Sunbird Settings is at \
-                {}",
-               config().map_or("", |config| &config.dashboard_url)
+               "tray: needs python3 with GTK 3 and AppIndicator bindings; press Ctrl+Shift+I in \
+                Discord for Sunbird DevTools"
             );
          }
       })

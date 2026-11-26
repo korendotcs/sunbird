@@ -2,9 +2,8 @@
 //!
 //! Desktop Phoenix renders natively in Rust with GPUI rather than Android's
 //! serialized UI-op bridge (`phoenix-ui-mobile`). This crate owns the
-//! desktop-side UI interactions: clipboard, opening URLs / standalone settings
-//! window, system tray + global hotkey (`Ctrl+Shift+U`) + native notifications,
-//! and the self-contained Desktop Settings dashboard served over localhost.
+//! desktop-side UI interactions: clipboard, opening URLs, the system tray,
+//! native notifications, and the `DevTools` page served over localhost.
 //!
 //! Each OS implements [`DesktopHost`]; everything above it is shared here.
 
@@ -19,10 +18,10 @@ mod windows;
 
 use std::{
    path::PathBuf,
-   process::Command,
    sync::{Arc, OnceLock},
-   thread,
 };
+#[cfg(target_os = "macos")]
+use std::{process::Command, thread};
 
 #[cfg(target_os = "linux")]
 use linux::Host as Os;
@@ -45,9 +44,11 @@ pub enum Error {
 
 /// Configuration and runtime callbacks for the desktop system tray.
 pub struct TrayConfig {
-   pub dashboard_url: String,
-   pub plugins_dir: PathBuf,
-   pub on_reload_all: Option<Arc<dyn Fn() + Send + Sync>>,
+   /// Starts the debug shell if it isn't running and returns the `DevTools`
+   /// URL.
+   pub devtools_url:     Arc<dyn Fn() -> String + Send + Sync>,
+   pub plugins_dir:      PathBuf,
+   pub on_reload_all:    Option<Arc<dyn Fn() + Send + Sync>>,
    pub on_check_updates: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
@@ -58,7 +59,6 @@ pub struct TrayConfig {
    allow(dead_code, reason = "no tray backend on this target")
 )]
 enum TrayAction {
-   OpenSettings,
    OpenDevtools,
    ReloadAll,
    CheckUpdates,
@@ -75,8 +75,7 @@ impl TrayAction {
          reason = "the Windows menu has its own labels with hotkey hints"
       )
    )]
-   const MENU: [Option<Self>; 8] = [
-      Some(Self::OpenSettings),
+   const MENU: [Option<Self>; 7] = [
       Some(Self::OpenDevtools),
       None,
       Some(Self::ReloadAll),
@@ -95,11 +94,10 @@ impl TrayAction {
    )]
    const fn label(self) -> &'static str {
       match self {
-         Self::OpenSettings => "Open Sunbird Settings",
-         Self::OpenDevtools => "Open DevTools (Console)",
+         Self::OpenDevtools => "Open DevTools",
          Self::ReloadAll => "Reload All Plugins",
          Self::CheckUpdates => "Check for Updates",
-         Self::CopyUrl => "Copy Dashboard URL",
+         Self::CopyUrl => "Copy DevTools URL",
          Self::OpenPlugins => "Open Plugins Folder",
       }
    }
@@ -113,7 +111,6 @@ impl TrayAction {
          return;
       };
       match self {
-         Self::OpenSettings => open_settings(),
          Self::OpenDevtools => open_devtools(),
          Self::ReloadAll => {
             if let Some(reload) = &config.on_reload_all {
@@ -126,8 +123,9 @@ impl TrayAction {
             }
          },
          Self::CopyUrl => {
-            if copy(&config.dashboard_url).is_ok() {
-               Os::notify("Sunbird", &format!("Copied {}", config.dashboard_url));
+            let url = (config.devtools_url)();
+            if copy(&url).is_ok() {
+               Os::notify("Sunbird", &format!("Copied {url}"));
             }
          },
          Self::OpenPlugins => {
@@ -153,11 +151,6 @@ trait DesktopHost {
       Err(Error::Unsupported)
    }
 
-   /// A Chromium-family browser that takes `--app=<url>`, if one is installed.
-   fn app_browser() -> Option<Command> {
-      None
-   }
-
    /// Asks for a `.js` file with the native picker.
    fn pick_js_path() -> Option<PathBuf> {
       None
@@ -181,47 +174,21 @@ fn config() -> Option<&'static TrayConfig> {
    CONFIG.get()
 }
 
-/// Starts the desktop system tray icon and `Ctrl+Shift+U` global hotkey
-/// pointing at `config.dashboard_url`.
+/// Starts the desktop system tray icon, which opens `DevTools`.
 pub fn start_tray(config: TrayConfig) {
    let _ = CONFIG.set(config);
    Os::start_tray();
 }
 
-/// Opens the Sunbird Settings dashboard in a standalone chromeless app window
-/// (a Chromium `--app` window when available, else the system browser).
-pub fn open_settings() {
-   if let Some(config) = config() {
-      open_app_window(&config.dashboard_url, 1020, 740);
-   }
-}
-
-/// Opens the Sunbird `DevTools` / Runtime Console directly in a standalone
-/// window (`Ctrl+Shift+I` while Discord Phoenix is focused).
+/// Opens the Sunbird `DevTools` / Runtime Console in the default browser
+/// (`Ctrl+Shift+I` while Discord Phoenix is focused).
 pub fn open_devtools() {
    if let Some(config) = config() {
-      open_app_window(&format!("{}#console", config.dashboard_url), 960, 680);
+      open_page(&(config.devtools_url)());
    }
 }
 
-fn open_app_window(url: &str, width: u32, height: u32) {
-   let Some(config) = config() else {
-      return;
-   };
-   if let Some(mut browser) = Os::app_browser() {
-      let profile_dir = config
-         .plugins_dir
-         .parent()
-         .unwrap_or(&config.plugins_dir)
-         .join("app-ui");
-      browser
-         .arg(format!("--app={url}"))
-         .arg(format!("--window-size={width},{height}"))
-         .arg(format!("--user-data-dir={}", profile_dir.display()));
-      if spawn_reaped(&mut browser).is_ok() {
-         return;
-      }
-   }
+fn open_page(url: &str) {
    if let Err(err) = open_url(url) {
       log::warn!("desktop ui: could not open {url}: {err}");
    }
@@ -229,6 +196,7 @@ fn open_app_window(url: &str, width: u32, height: u32) {
 
 /// Spawns `command` and waits for it on a background thread, so it never
 /// lingers as a zombie on Unix.
+#[cfg(target_os = "macos")]
 fn spawn_reaped(command: &mut Command) -> Result<(), Error> {
    let mut child = command.spawn().map_err(|err| Error::Platform {
       message: format!("{}: {err}", command.get_program().display()),
@@ -238,7 +206,6 @@ fn spawn_reaped(command: &mut Command) -> Result<(), Error> {
       .spawn(move || child.wait());
    Ok(())
 }
-
 /// Copies `text` to the system clipboard.
 pub fn copy(text: &str) -> Result<(), Error> {
    Os::copy(text)
@@ -298,7 +265,7 @@ mod tests {
    #[test]
    fn tray_menu_lists_every_action_once() {
       let actions = TrayAction::MENU.iter().flatten().collect::<Vec<_>>();
-      assert_eq!(actions.len(), 6);
+      assert_eq!(actions.len(), 5);
       for (at, action) in actions.iter().enumerate() {
          assert!(!actions[at + 1..].contains(action));
          assert_ne!(action.label(), "");
@@ -308,7 +275,7 @@ mod tests {
    #[test]
    fn dashboard_html_is_embedded() {
       assert!(DASHBOARD_HTML.contains("<title>Sunbird"));
-      assert!(DASHBOARD_HTML.contains("/plugins"));
-      assert!(DASHBOARD_HTML.contains("/catalog"));
+      assert!(DASHBOARD_HTML.contains("/eval"));
+      assert!(DASHBOARD_HTML.contains("/logs"));
    }
 }

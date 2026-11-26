@@ -15,9 +15,10 @@ site=${SUNBIRD_SITE:-https://assets.sunbird.tools}
 data=${XDG_DATA_HOME:-$HOME/.local/share}
 home=$data/sunbird
 entry=$data/applications/sunbird.desktop
+gate_entry=$data/applications/sunbird-gate-only.desktop
 
 if [ "${1:-}" = --uninstall ]; then
-   rm -rf "$home" "$entry"
+   rm -rf "$home" "$entry" "$gate_entry"
    echo "Sunbird is uninstalled. Discord itself was not changed."
    exit 0
 fi
@@ -144,6 +145,17 @@ Icon=discord
 Terminal=false
 Categories=Network;InstantMessaging;
 MimeType=x-scheme-handler/discord;
+EOF
+# For when the plugin runtime crashes on a Discord build it doesn't know yet.
+cat >"$gate_entry" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Sunbird (access gate only)
+Comment=Discord past the access gate, without plugins
+Exec="$home/sunbird" --no-runtime %U
+Icon=discord
+Terminal=false
+Categories=Network;InstantMessaging;
 EOF
 command -v update-desktop-database >/dev/null && update-desktop-database "$data/applications" || true
 

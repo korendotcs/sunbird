@@ -705,6 +705,8 @@ struct SettingJson<'a> {
    key:         &'a str,
    title:       &'a str,
    description: Option<&'a str>,
+   #[serde(skip_serializing_if = "std::ops::Not::not")]
+   multiline:   bool,
    #[serde(flatten)]
    control:     ControlJson<'a>,
 }
@@ -740,6 +742,7 @@ impl<'a> From<&'a Setting> for SettingJson<'a> {
          key: &setting.key,
          title: &setting.title,
          description: setting.description.as_deref(),
+         multiline: setting.multiline,
          control,
       }
    }

@@ -3,928 +3,338 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Sunbird — Desktop Settings</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%231e1f22'/><circle cx='16' cy='16' r='12' fill='%23f59e0b'/><circle cx='16' cy='16' r='5' fill='%23fff3b0'/></svg>" />
+<title>Sunbird DevTools</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%23f59e0b'/><circle cx='16' cy='16' r='5' fill='%23fff3b0'/></svg>" />
 <style>
   :root {
-    --bg: #111214;
-    --surface: #1e1f22;
-    --card: #2b2d31;
-    --border: #383a40;
-    --text: #f2f3f5;
-    --muted: #949ba4;
-    --accent: #f59e0b;
-    --green: #23a55a;
-    --red: #da373c;
-    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --bg: #17181b;
+    --bar: #1e1f23;
+    --row-line: #24262b;
+    --hover: #212328;
+    --border: #2e3036;
+    --text: #e3e5e8;
+    --muted: #80848e;
+    --faint: #5c6069;
+    --accent: #f5a524;
+    --info: #6aa9ff;
+    --warn: #e8b339;
+    --warn-bg: #2a2416;
+    --error: #ff6b6b;
+    --error-bg: #2c1a1c;
+    --ok: #3ccf7a;
+    --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", SFMono-Regular, Menlo, Consolas, monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     margin: 0;
+    display: flex;
+    flex-direction: column;
     background: var(--bg);
     color: var(--text);
-    font: 14px/1.5 var(--sans);
-    display: flex;
-    min-height: 100vh;
+    font: 13px/1.45 var(--sans);
   }
-  nav {
-    width: 230px;
-    background: var(--surface);
-    border-right: 1px solid var(--border);
-    padding: 20px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    flex-shrink: 0;
-  }
-  .brand {
-    font-weight: 700;
-    font-size: 16px;
-    padding: 4px 10px 14px;
+  header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--bar);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
   }
-  .brand-left { display: flex; align-items: center; gap: 8px; }
-  .dot {
-    width: 10px; height: 10px; border-radius: 50%;
-    background: var(--green); flex-shrink: 0;
-    box-shadow: 0 0 8px rgba(35,165,90,0.6);
-  }
-  .dot.offline { background: var(--red); box-shadow: 0 0 8px rgba(218,55,60,0.6); }
-  .pill {
-    font: 11px/1 var(--mono);
-    background: var(--card);
-    border: 1px solid var(--border);
-    color: var(--muted);
-    padding: 4px 7px;
-    border-radius: 999px;
-  }
-  .badge {
-    font: 11px/1 var(--sans);
-    font-weight: 600;
-    padding: 3px 7px;
-    border-radius: 999px;
-    display: inline-block;
-    margin-left: 6px;
-    vertical-align: middle;
-  }
-  .badge.desktop { background: rgba(35,165,90,0.18); color: #86efac; border: 1px solid rgba(35,165,90,0.4); }
-  .badge.partial { background: rgba(245,158,11,0.16); color: #fcd34d; border: 1px solid rgba(245,158,11,0.35); }
-  .badge.unverified { background: rgba(147,197,253,0.14); color: #93c5fd; border: 1px solid rgba(147,197,253,0.32); }
-  .badge.mobile { background: rgba(168,85,247,0.2); color: #d8b4fe; border: 1px solid rgba(192,132,252,0.48); }
-  nav button {
-    all: unset;
-    cursor: pointer;
-    padding: 9px 12px;
-    border-radius: 6px;
-    color: var(--muted);
-    font-weight: 500;
-  }
-  nav button:hover { background: rgba(255,255,255,0.05); color: var(--text); }
-  nav button.active { background: var(--card); color: var(--text); }
-  .nav-footer {
-    margin-top: auto;
-    padding: 12px 10px 4px;
-    border-top: 1px solid var(--border);
-    color: var(--muted);
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-right: 6px; }
+  .brand i { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px #f5a52426; }
+  .status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+  .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+  .status.off::before { background: var(--error); }
+  .spacer { flex: 1; }
+  .levels { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .levels button { border: 0; border-radius: 0; background: transparent; padding: 4px 10px; }
+  .levels button + button { border-left: 1px solid var(--border); }
+  .levels button[aria-pressed="true"] { background: #2b2d33; color: var(--text); }
+  button {
+    font: inherit;
     font-size: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  kbd {
-    font: 11px var(--mono);
-    background: var(--card);
+    color: var(--muted);
+    background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 1px 5px;
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  button:hover { color: var(--text); background: var(--hover); }
+  button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  input[type="search"] {
+    font: inherit;
+    font-size: 12px;
+    width: 200px;
     color: var(--text);
-  }
-  main {
-    flex: 1;
-    max-width: 920px;
-    padding: 28px 32px;
-    overflow-y: auto;
-  }
-  h1 { margin: 0 0 6px; font-size: 22px; }
-  .sub { color: var(--muted); margin: 0 0 18px; }
-  .toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
-  .card {
-    background: var(--card);
+    background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 16px;
-    margin-bottom: 12px;
+    border-radius: 6px;
+    padding: 4px 8px;
+  }
+  label.follow { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; cursor: pointer; }
+  #console {
+    flex: 1;
+    overflow-y: auto;
+    font: 12px/1.5 var(--mono);
   }
   .row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-  .title { font-weight: 600; font-size: 15px; }
-  .meta { color: var(--muted); font-size: 12px; }
-  .err {
-    margin-top: 10px;
-    padding: 8px 10px;
-    background: rgba(218,55,60,0.14);
-    border: 1px solid rgba(218,55,60,0.45);
-    border-radius: 6px;
-    color: #fca5a5;
-    font: 12px/1.4 var(--mono);
-    white-space: pre-wrap;
-  }
-  .banner {
-    margin-bottom: 16px;
-    padding: 10px 14px;
-    background: rgba(218,55,60,0.16);
-    border: 1px solid rgba(218,55,60,0.5);
-    border-radius: 8px;
-    color: #fca5a5;
-  }
-  .warn {
-    margin-top: 8px;
-    padding: 6px 10px;
-    background: rgba(245,158,11,0.12);
-    border: 1px solid rgba(245,158,11,0.35);
-    border-radius: 6px;
-    color: #fcd34d;
-    font-size: 12px;
-  }
-  .btn {
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--text);
-    padding: 6px 12px;
-    border-radius: 6px;
-    cursor: pointer;
-    font: 500 13px var(--sans);
-    white-space: nowrap;
-  }
-  .btn:hover { filter: brightness(1.12); }
-  .btn.primary { background: var(--accent); border-color: var(--accent); color: #111; font-weight: 600; }
-  .btn.danger { background: rgba(218,55,60,0.16); border-color: rgba(218,55,60,0.5); color: #fca5a5; }
-  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  input[type="text"], input[type="password"], input[type="number"], select, textarea {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 7px 10px;
-    border-radius: 6px;
-    font: 13px var(--sans);
-  }
-  input[type="text"], input[type="password"], textarea { width: 100%; }
-  .settings {
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: 92px 1fr;
     gap: 10px;
-  }
-  .setting {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-  }
-  .setting-info { flex: 1; min-width: 0; }
-  .setting-ctrl { flex-shrink: 0; min-width: 180px; display: flex; justify-content: flex-end; gap: 6px; }
-  .switch {
-    position: relative;
-    width: 40px;
-    height: 22px;
-    display: inline-block;
-  }
-  .switch input { opacity: 0; width: 0; height: 0; }
-  .slider {
-    position: absolute; inset: 0; cursor: pointer;
-    background: #4e5058; border-radius: 999px; transition: .15s;
-  }
-  .slider::before {
-    content: ""; position: absolute; left: 3px; top: 3px;
-    width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: .15s;
-  }
-  .switch input:checked + .slider { background: var(--green); }
-  .switch input:checked + .slider::before { transform: translateX(18px); }
-  pre.log {
-    background: #0d0e10;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px;
-    font: 12px/1.5 var(--mono);
-    max-height: 440px;
-    overflow: auto;
+    padding: 2px 12px;
+    border-bottom: 1px solid var(--row-line);
     white-space: pre-wrap;
-    word-break: break-word;
+    overflow-wrap: anywhere;
   }
-  .toast {
-    position: fixed;
-    right: 20px;
-    bottom: 20px;
-    background: var(--card);
-    border: 1px solid var(--accent);
-    padding: 10px 14px;
-    border-radius: 8px;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.45);
-    display: none;
-    max-width: 420px;
+  .row:hover { background: var(--hover); }
+  .row .time { color: var(--faint); }
+  .row.warn { background: var(--warn-bg); color: var(--warn); }
+  .row.error { background: var(--error-bg); color: var(--error); }
+  .row.debug, .row.trace { color: var(--muted); }
+  .row .lvl { font-weight: 600; margin-right: 6px; }
+  .row.info .lvl { color: var(--info); }
+  .row.input { color: var(--text); }
+  .row.result { color: #b9c0cc; }
+  .row.result.failed { color: var(--error); background: var(--error-bg); }
+  .row.note { color: var(--faint); font-style: italic; }
+  .hidden { display: none !important; }
+  footer {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bar);
+    border-top: 1px solid var(--border);
   }
-  .toast.error { border-color: var(--red); color: #fca5a5; }
-  .hidden { display: none; }
-  body.embedded {
-    --bg: #1a1a1e;
-    --surface: #232428;
-    --card: #2b2d31;
-    flex-direction: column;
+  footer span { color: var(--accent); font: 600 13px/1.5 var(--mono); padding-top: 3px; }
+  #prompt {
+    flex: 1;
+    resize: none;
+    min-height: 26px;
+    max-height: 40vh;
+    color: var(--text);
+    background: transparent;
+    border: 0;
+    padding: 3px 0;
+    font: 12px/1.5 var(--mono);
   }
-  body.embedded nav {
-    width: 100%;
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-    padding: 10px 18px;
-    flex-direction: row;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    background: var(--bg);
+  #prompt:focus-visible { outline: none; }
+  footer small { color: var(--faint); font-size: 11px; padding-top: 5px; white-space: nowrap; }
+  @media (max-width: 640px) {
+    input[type="search"] { width: 120px; }
+    footer small { display: none; }
+    .row { grid-template-columns: 1fr; gap: 0; }
   }
-  body.embedded .brand { padding: 0 8px 0 0; }
-  body.embedded .nav-footer {
-    margin-top: 0;
-    margin-left: auto;
-    padding: 0;
-    border-top: none;
-    flex-direction: row;
-    align-items: center;
-    gap: 12px;
-  }
-  body.embedded .nav-shortcut { display: none; }
-  body.embedded main {
-    max-width: 100%;
-    padding: 20px 24px 28px;
-  }
-  #popout-btn { display: none; }
-  body.embedded #popout-btn { display: inline-flex; }
 </style>
 </head>
 <body>
-<nav>
-  <div class="brand">
-    <span class="brand-left"><span id="conn-dot" class="dot"></span><span>Sunbird</span></span>
-    <span id="version-pill" class="pill">…</span>
+<header>
+  <div class="brand"><i></i>Sunbird DevTools</div>
+  <div class="status" id="status">Connected</div>
+  <div class="spacer"></div>
+  <div class="levels" role="group" aria-label="Log levels">
+    <button data-level="all" aria-pressed="true">All</button>
+    <button data-level="warn" aria-pressed="false">Warnings</button>
+    <button data-level="error" aria-pressed="false">Errors</button>
   </div>
-  <button class="active" data-tab="plugins">Plugins</button>
-  <button data-tab="catalog">Plugin Catalog</button>
-  <button data-tab="updates">Updates</button>
-  <button data-tab="console">Console</button>
-  <button data-tab="dialogs">Dialogs</button>
-  <div class="nav-footer">
-    <div class="row">
-      <span>Staff Unlock</span>
-      <label class="switch">
-        <input id="staff-toggle" type="checkbox" />
-        <span class="slider"></span>
-      </label>
-    </div>
-    <button class="btn" id="popout-btn" title="Open in standalone window">Pop out</button>
-    <div class="nav-shortcut">Settings: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>U</kbd> · DevTools: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd></div>
-  </div>
-</nav>
-<main>
-  <div id="conn-banner" class="banner hidden"></div>
-
-  <section id="tab-plugins">
-    <div class="row" style="margin-bottom:6px">
-      <h1>Installed Plugins</h1>
-      <div class="toolbar" style="margin:0">
-        <input id="local-js-input" type="file" accept=".js" class="hidden" />
-        <button class="btn" id="upload-js-btn">Load .js File</button>
-        <button class="btn" id="reload-all-btn">Reload All</button>
-      </div>
-    </div>
-    <p class="sub">Toggle plugins, reload live, or configure plugin settings.</p>
-    <div id="plugins-list"></div>
-  </section>
-
-  <section id="tab-catalog" class="hidden">
-    <h1>Plugin Catalog</h1>
-    <p class="sub">Install official plugins from assets.sunbird.tools or any HTTPS bundle URL.</p>
-    <div class="card">
-      <div class="row">
-        <input id="custom-url" type="text" placeholder="https://example.com/my-plugin.js" />
-        <button class="btn primary" id="install-url-btn">Install URL</button>
-      </div>
-    </div>
-    <div id="catalog-list"></div>
-  </section>
-
-  <section id="tab-updates" class="hidden">
-    <h1>Updates</h1>
-    <p class="sub">Check for new Sunbird builds and over-the-air plugin updates.</p>
-    <div class="toolbar">
-      <button class="btn primary" id="check-update-btn">Check for updates</button>
-      <button class="btn" id="apply-update-btn">Apply plugin updates</button>
-    </div>
-    <div id="update-box" class="card"></div>
-  </section>
-
-  <section id="tab-console" class="hidden">
-    <h1>Runtime Console</h1>
-    <p class="sub">Evaluate JavaScript in the QuickJS plugin runtime (<kbd>Ctrl</kbd>+<kbd>Enter</kbd> to run).</p>
-    <div class="card">
-      <textarea id="eval-input" rows="3" placeholder="Object.keys(phoenix.gateway).length"></textarea>
-      <div class="toolbar" style="margin:10px 0 0">
-        <button class="btn primary" id="eval-run-btn">Run</button>
-        <button class="btn" id="logs-refresh-btn">Refresh logs</button>
-      </div>
-      <pre id="eval-out" class="log hidden" style="margin-top:10px"></pre>
-    </div>
-    <pre id="logs-out" class="log"></pre>
-  </section>
-
-  <section id="tab-dialogs" class="hidden">
-    <h1>Native Dialogs</h1>
-    <p class="sub">Open the same native GPUI choose and code-sheet dialogs plugins get, and read back the picked option.</p>
-    <div class="card">
-      <div class="settings" style="border-top:none;padding-top:0;margin-top:0">
-        <div class="setting">
-          <div class="setting-info"><div>Title</div></div>
-          <div class="setting-ctrl"><input id="dialog-title" type="text" value="Sunbird" /></div>
-        </div>
-        <div class="setting">
-          <div class="setting-info">
-            <div>Text</div>
-            <div class="meta">Message for choose, code for the sheet.</div>
-          </div>
-          <div class="setting-ctrl"><textarea id="dialog-text" rows="4"></textarea></div>
-        </div>
-        <div class="setting">
-          <div class="setting-info">
-            <div>Options</div>
-            <div class="meta">One per line. Empty opens a message-only dialog.</div>
-          </div>
-          <div class="setting-ctrl"><textarea id="dialog-options" rows="4" placeholder="Copy&#10;Open link"></textarea></div>
-        </div>
-        <div class="setting">
-          <div class="setting-info">
-            <div>Sheet code</div>
-            <div class="meta">Monospace / syntax highlighting</div>
-          </div>
-          <div class="setting-ctrl" style="align-items:center;gap:12px">
-            <label class="meta" style="display:flex;align-items:center;gap:5px"><input id="dialog-mono" type="checkbox" checked /> Mono</label>
-            <label class="meta" style="display:flex;align-items:center;gap:5px"><input id="dialog-highlight" type="checkbox" checked /> Highlight</label>
-          </div>
-        </div>
-      </div>
-      <div class="toolbar" style="margin:12px 0 0">
-        <button class="btn primary" id="dialog-choose-btn">Open choose</button>
-        <button class="btn" id="dialog-sheet-btn">Open sheet</button>
-        <span id="dialog-result" class="meta"></span>
-      </div>
-    </div>
-  </section>
-</main>
-<div id="toast" class="toast"></div>
+  <input type="search" id="filter" placeholder="Filter" aria-label="Filter logs" />
+  <label class="follow"><input type="checkbox" id="follow" checked /> Follow</label>
+  <button id="clear" title="Clear the view">Clear</button>
+  <button id="reload" title="Reload every plugin">Reload plugins</button>
+</header>
+<div id="console" role="log" aria-live="polite"></div>
+<footer>
+  <span aria-hidden="true">›</span>
+  <textarea id="prompt" rows="1" spellcheck="false" aria-label="JavaScript to run in the plugin runtime"
+    placeholder="Run JavaScript in the plugin runtime, like Object.keys(phoenix)"></textarea>
+  <small>Enter runs · Shift+Enter new line · ↑↓ history</small>
+</footer>
 <script>
-const $ = (s) => document.querySelector(s);
-const IS_EMBEDDED = new URLSearchParams(location.search).get('embedded') === '1';
-if (IS_EMBEDDED) document.body.classList.add('embedded');
-let installedNames = new Set();
-let activeTab = 'plugins';
-let catalogTimer = null;
+const $ = (id) => document.getElementById(id);
+const view = $('console');
+const prompt = $('prompt');
+const RANK = { trace: 0, debug: 0, info: 1, warn: 2, error: 3 };
+let level = 'all';
+let known = [];
+let past = [];
+let at = 0;
 
-const DESKTOP_FULL = new Set([
-  'silent-typing', 'message-latency', 'message-logger', 'no-profile-themes',
-  'no-reply-mention', 'spoiler-mode', 'text-replace', 'view-raw',
-  'global-badges', 'dearrow', 'translate', 'clear-urls', 'fix-embeds'
-]);
-const DESKTOP_PARTIAL = new Set(['fakenitro']);
-const MOBILE_ONLY = new Set(['hide-composer-buttons', 'reviewdb', 'taptap', 'example']);
+// The cookie the token set carries on, so it doesn't need to stay in the address bar.
+if (location.search) window.history.replaceState(null, '', location.pathname);
+try { past = JSON.parse(localStorage.getItem('sunbird.past') || '[]'); } catch {}
+at = past.length;
 
-function compatBadge(name) {
-  if (DESKTOP_FULL.has(name)) return '<span class="badge desktop">Desktop Ready</span>';
-  if (DESKTOP_PARTIAL.has(name)) return '<span class="badge partial">Partial Desktop</span>';
-  if (MOBILE_ONLY.has(name)) return '<span class="badge mobile">Mobile Only</span>';
-  return '<span class="badge unverified">Unverified</span>';
+function setOnline(ok, why = '') {
+  $('status').classList.toggle('off', !ok);
+  $('status').textContent = ok ? 'Connected' : 'Disconnected' + (why ? ': ' + why : '');
 }
 
-function notify(msg, isError = false) {
-  const el = $('#toast');
-  el.textContent = msg;
-  el.classList.toggle('error', isError);
-  el.style.display = 'block';
-  clearTimeout(notify._t);
-  notify._t = setTimeout(() => { el.style.display = 'none'; }, isError ? 4500 : 3000);
-}
-
-function setConnected(ok, errMsg = '') {
-  $('#conn-dot').classList.toggle('offline', !ok);
-  const banner = $('#conn-banner');
-  if (ok) {
-    banner.classList.add('hidden');
-  } else {
-    banner.textContent = 'Lost connection to Sunbird runtime: ' + errMsg;
-    banner.classList.remove('hidden');
-  }
-}
-
-async function api(path, opts = {}, rawText = false) {
+async function api(path, opts) {
   const res = await fetch(path, opts);
   const text = await res.text();
   if (!res.ok) throw new Error(text || res.statusText);
-  setConnected(true);
-  if (rawText) return text;
-  try { return JSON.parse(text); } catch { return text; }
+  setOnline(true);
+  return text;
 }
 
-function esc(s) {
-  const d = document.createElement('div');
-  d.textContent = s == null ? '' : String(s);
-  return d.innerHTML;
+function visible(row) {
+  const rank = RANK[row.dataset.level];
+  if (level !== 'all' && rank !== undefined && rank < RANK[level]) return false;
+  if (level !== 'all' && rank === undefined) return false;
+  const query = $('filter').value.trim().toLowerCase();
+  return !query || row.textContent.toLowerCase().includes(query);
 }
 
-function switchTab(tab) {
-  activeTab = tab;
-  clearTimeout(catalogTimer);
-  document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
-  document.querySelectorAll('main section').forEach((s) => s.classList.toggle('hidden', s.id !== 'tab-' + tab));
-  if (tab === 'plugins') loadPlugins();
-  if (tab === 'catalog') loadCatalog();
-  if (tab === 'updates') loadUpdates();
-  if (tab === 'console') {
-    loadLogs();
-    setTimeout(() => { const inp = $('#eval-input'); if (inp) inp.focus(); }, 0);
+function add(kind, time, text, lvl) {
+  const follow = $('follow').checked;
+  const row = document.createElement('div');
+  row.className = 'row ' + kind;
+  row.dataset.level = lvl || '';
+  const left = document.createElement('span');
+  left.className = 'time';
+  left.textContent = time;
+  const body = document.createElement('span');
+  if (lvl && !/input|result/.test(kind)) {
+    const tag = document.createElement('span');
+    tag.className = 'lvl';
+    tag.textContent = lvl.toUpperCase();
+    body.append(tag);
   }
+  body.append(text);
+  row.append(left, body);
+  row.classList.toggle('hidden', !visible(row));
+  view.append(row);
+  while (view.childElementCount > 5000) view.firstElementChild.remove();
+  if (follow) view.scrollTop = view.scrollHeight;
+  return row;
 }
 
-document.querySelectorAll('nav button').forEach((btn) => {
-  btn.onclick = () => switchTab(btn.dataset.tab);
-});
+function parse(line) {
+  const match = /^(\S+) \[(\w+)\] ([\s\S]*)$/.exec(line);
+  return match ? { time: match[1], lvl: match[2].toLowerCase(), text: match[3] } : null;
+}
 
-$('#popout-btn').onclick = () => {
-  api('/ui/popout', { method: 'POST' }).catch(() => {});
-};
+let polling = null;
+let awaitingResult = false;
 
-window.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && (e.key === 'I' || e.key === 'i')) {
-    e.preventDefault();
-    switchTab('console');
-  } else if (IS_EMBEDDED && e.key === 'Escape') {
-    e.preventDefault();
-    api('/ui/close', { method: 'POST' }).catch(() => {});
-  }
-});
+// One poll at a time: two in flight would both append the same new lines.
+function poll() {
+  polling ??= pollOnce().finally(() => { polling = null; });
+  return polling;
+}
 
-$('#staff-toggle').onchange = async (e) => {
-  const wanted = e.target.checked;
+async function pollOnce() {
   try {
-    await api('/debug/staff', { method: 'POST', body: wanted ? 'true' : 'false' });
-    notify(`Staff unlock ${wanted ? 'enabled' : 'disabled'}`);
-  } catch (err) {
-    e.target.checked = !wanted;
-    notify(`Failed: ${err.message}`, true);
-  }
-};
-
-$('#reload-all-btn').onclick = async () => {
-  try {
-    await api('/plugins/reload-all', { method: 'POST' });
-    notify('Reloaded all enabled plugins');
-    loadPlugins();
-  } catch (err) {
-    notify(`Reload failed: ${err.message}`, true);
-  }
-};
-
-$('#upload-js-btn').onclick = () => $('#local-js-input').click();
-$('#local-js-input').onchange = async (e) => {
-  const file = e.target.files && e.target.files[0];
-  e.target.value = '';
-  if (!file) return;
-  const name = file.name.replace(/\.js$/i, '');
-  try {
-    const source = await file.text();
-    await api(`/plugins/${encodeURIComponent(name)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'text/javascript; charset=utf-8' },
-      body: source
-    });
-    notify(`Installed ${name}`);
-    loadPlugins();
-  } catch (err) {
-    notify(`Install failed: ${err.message}`, true);
-  }
-};
-
-async function loadPlugins() {
-  try {
-    const status = await api('/status');
-    $('#version-pill').textContent = status.version || 'dev';
-    $('#staff-toggle').checked = !!status.staff;
-    installedNames = new Set(status.plugins.map((p) => p.name));
-    const root = $('#plugins-list');
-    if (!status.plugins.length) {
-      root.innerHTML = `
-        <div class="card">
-          <div class="title" style="margin-bottom:6px">Welcome to Sunbird Desktop</div>
-          <div class="meta" style="margin-bottom:14px;color:var(--text)">
-            Sunbird is connected to Discord Phoenix. Install plugins from the official catalog or load a local <code>.js</code> bundle to get started.
-          </div>
-          <div class="toolbar" style="margin:0">
-            <button class="btn primary" id="empty-browse-btn">Browse Plugin Catalog</button>
-            <button class="btn" id="empty-upload-btn">Load Local .js File</button>
-          </div>
-        </div>
-      `;
-      $('#empty-browse-btn').onclick = () => switchTab('catalog');
-      $('#empty-upload-btn').onclick = () => $('#local-js-input').click();
-      return;
+    const lines = (await api('/logs')).split('\n').filter(Boolean);
+    // The runtime keeps a ring buffer, so new lines are the ones after the
+    // last one already shown.
+    let start = 0;
+    if (known.length) {
+      const index = lines.lastIndexOf(known[known.length - 1]);
+      start = index >= 0 ? index + 1 : 0;
     }
-    root.innerHTML = '';
-    for (const p of status.plugins) {
-      const card = document.createElement('div');
-      card.className = 'card';
-      const meta = [p.version && 'v' + p.version, p.author && 'by ' + p.author].filter(Boolean).join(' · ');
-      card.innerHTML = `
-        <div class="row">
-          <div>
-            <div class="title">${esc(p.name)}${compatBadge(p.name)}</div>
-            ${meta ? `<div class="meta">${esc(meta)}</div>` : ''}
-            ${p.description ? `<div class="meta" style="margin-top:2px;color:var(--text)">${esc(p.description)}</div>` : ''}
-          </div>
-          <div class="row">
-            <button class="btn" data-act="reload">Reload</button>
-            ${p.installed ? '<button class="btn danger" data-act="delete">Remove</button>' : ''}
-            <label class="switch">
-              <input type="checkbox" ${p.enabled ? 'checked' : ''} data-act="toggle" />
-              <span class="slider"></span>
-            </label>
-          </div>
-        </div>
-        ${p.error ? `<div class="err">${esc(p.error)}</div>` : ''}
-      `;
-      card.querySelector('[data-act="toggle"]').onchange = async (e) => {
-        const checked = e.target.checked;
-        try {
-          await api(`/plugins/${encodeURIComponent(p.name)}/${checked ? 'enable' : 'disable'}`, { method: 'POST' });
-          notify(`${p.name} ${checked ? 'enabled' : 'disabled'}`);
-          loadPlugins();
-        } catch (err) {
-          e.target.checked = !checked;
-          notify(`Toggle failed: ${err.message}`, true);
-        }
-      };
-      card.querySelector('[data-act="reload"]').onclick = async () => {
-        try {
-          await api(`/plugins/${encodeURIComponent(p.name)}/reload`, { method: 'POST' });
-          notify(`Reloaded ${p.name}`);
-          loadPlugins();
-        } catch (err) {
-          notify(`Reload failed: ${err.message}`, true);
-        }
-      };
-      const del = card.querySelector('[data-act="delete"]');
-      if (del) {
-        del.onclick = async () => {
-          if (!confirm(`Remove plugin "${p.name}"?`)) return;
-          try {
-            await api(`/plugins/${encodeURIComponent(p.name)}`, { method: 'DELETE' });
-            notify(`Removed ${p.name}`);
-            loadPlugins();
-          } catch (err) {
-            notify(`Remove failed: ${err.message}`, true);
-          }
-        };
+    for (const line of lines.slice(start)) {
+      const entry = parse(line);
+      if (!entry) {
+        view.lastElementChild?.lastElementChild.append('\n' + line);
+      } else if (entry.text.startsWith('> ')) {
+        // The runtime logs every eval as `> code`, then its result.
+        add('input', entry.time, '› ' + entry.text.slice(2), entry.lvl);
+        awaitingResult = true;
+      } else if (awaitingResult) {
+        awaitingResult = false;
+        const failed = entry.lvl === 'error';
+        add(failed ? 'result failed' : 'result', entry.time, '‹ ' + pretty(entry.text), entry.lvl);
+      } else {
+        add(entry.lvl, entry.time, entry.text, entry.lvl);
       }
-      if (p.settings && p.settings.length) {
-        const box = document.createElement('div');
-        box.className = 'settings';
-        for (const s of p.settings) {
-          const row = document.createElement('div');
-          row.className = 'setting';
-          row.innerHTML = `
-            <div class="setting-info">
-              <div>${esc(s.title)}</div>
-              ${s.description ? `<div class="meta">${esc(s.description)}</div>` : ''}
-            </div>
-            <div class="setting-ctrl"></div>
-          `;
-          const ctrl = row.querySelector('.setting-ctrl');
-          const save = async (value) => {
-            try {
-              await api(`/plugins/${encodeURIComponent(p.name)}/setting`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ key: s.key, value })
-              });
-              notify(`Saved ${s.title}`);
-              return true;
-            } catch (err) {
-              notify(`Save failed: ${err.message}`, true);
-              return false;
-            }
-          };
-
-          if (s.type === 'switch') {
-            ctrl.innerHTML = `<label class="switch"><input type="checkbox" ${s.value ? 'checked' : ''} /><span class="slider"></span></label>`;
-            ctrl.querySelector('input').onchange = async (e) => {
-              const ok = await save(e.target.checked);
-              if (!ok) e.target.checked = !e.target.checked;
-            };
-          } else if (s.type === 'text' || s.type === 'secret') {
-            const inp = document.createElement('input');
-            inp.type = s.type === 'secret' ? 'password' : 'text';
-            inp.value = s.type === 'secret' ? '' : (s.value || '');
-            inp.placeholder = s.type === 'secret' ? (s.has_value ? '•••••••• (set)' : 'Enter secret') : '';
-            const btn = document.createElement('button');
-            btn.className = 'btn';
-            btn.textContent = 'Save';
-            btn.onclick = async () => {
-              if (s.type === 'secret' && !inp.value) {
-                notify('Enter a value before saving a secret', true);
-                return;
-              }
-              if (await save(inp.value) && s.type === 'secret') {
-                inp.value = '';
-                inp.placeholder = '•••••••• (set)';
-              }
-            };
-            ctrl.append(inp, btn);
-          } else if (s.type === 'number') {
-            const inp = document.createElement('input');
-            inp.type = 'number';
-            inp.step = 'any';
-            inp.value = s.value;
-            inp.style.width = '110px';
-            const btn = document.createElement('button');
-            btn.className = 'btn';
-            btn.textContent = 'Save';
-            btn.onclick = () => {
-              const num = Number(inp.value);
-              if (inp.value === '' || !Number.isFinite(num)) {
-                notify('Enter a valid number', true);
-                return;
-              }
-              save(num);
-            };
-            ctrl.append(inp, btn);
-          } else if (s.type === 'select') {
-            const sel = document.createElement('select');
-            for (const opt of s.options) {
-              const o = document.createElement('option');
-              o.value = opt.value;
-              o.textContent = opt.label;
-              if (opt.value === s.value) o.selected = true;
-              sel.append(o);
-            }
-            sel.onchange = () => save(sel.value);
-            ctrl.append(sel);
-          } else if (s.type === 'button') {
-            const btn = document.createElement('button');
-            btn.className = 'btn';
-            btn.textContent = s.title;
-            btn.onclick = async () => {
-              try {
-                await api(`/plugins/${encodeURIComponent(p.name)}/press`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ key: s.key })
-                });
-                notify(`Triggered ${s.title}`);
-              } catch (err) {
-                notify(`Action failed: ${err.message}`, true);
-              }
-            };
-            ctrl.append(btn);
-          }
-          box.append(row);
-        }
-        card.append(box);
-      }
-      root.append(card);
     }
+    known = lines;
   } catch (err) {
-    setConnected(false, err.message);
+    setOnline(false, err.message);
   }
 }
 
-async function loadCatalog() {
-  const root = $('#catalog-list');
+function pretty(raw) {
   try {
-    const data = await api('/catalog');
-    if (data.state === 'loading' || data.state === 'unfetched') {
-      root.innerHTML = '<div class="card"><div class="meta">Fetching catalog from assets.sunbird.tools…</div></div>';
-      if (activeTab === 'catalog') {
-        clearTimeout(catalogTimer);
-        catalogTimer = setTimeout(loadCatalog, 700);
-      }
-      return;
-    }
-    if (data.state === 'failed') {
-      root.innerHTML = `
-        <div class="card">
-          <div class="err" style="margin-top:0">${esc(data.error)}</div>
-          <button class="btn primary" id="retry-catalog-btn" style="margin-top:10px">Retry</button>
-        </div>
-      `;
-      $('#retry-catalog-btn').onclick = async () => {
-        try {
-          await api('/catalog/refresh', { method: 'POST' });
-          loadCatalog();
-        } catch (err) {
-          notify(`Retry failed: ${err.message}`, true);
-        }
-      };
-      return;
-    }
-    root.innerHTML = '';
-    const sorted = [...data.plugins].sort((a, b) => {
-      const rank = (n) => DESKTOP_FULL.has(n) ? 0 : (DESKTOP_PARTIAL.has(n) ? 1 : (MOBILE_ONLY.has(n) ? 3 : 2));
-      return rank(a.name) - rank(b.name) || a.name.localeCompare(b.name);
-    });
-    for (const item of sorted) {
-      const installed = installedNames.has(item.name);
-      const card = document.createElement('div');
-      card.className = 'card';
-      card.innerHTML = `
-        <div class="row">
-          <div>
-            <div class="title">${esc(item.name)}${compatBadge(item.name)}</div>
-            <div class="meta" style="color:var(--text)">${esc(item.description)}</div>
-          </div>
-          <button class="btn ${installed ? '' : 'primary'}">${installed ? 'Reinstall' : 'Install'}</button>
-        </div>
-        ${item.warning ? `<div class="warn">${esc(item.warning)}</div>` : ''}
-      `;
-      card.querySelector('button').onclick = async (e) => {
-        e.target.disabled = true;
-        try {
-          await api('/catalog/install', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: item.name })
-          });
-          notify(`Installed ${item.name}`);
-          installedNames.add(item.name);
-          loadCatalog();
-        } catch (err) {
-          notify(`Install failed: ${err.message}`, true);
-          e.target.disabled = false;
-        }
-      };
-      root.append(card);
-    }
-  } catch (err) {
-    setConnected(false, err.message);
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed !== null ? JSON.stringify(parsed, null, 2) : raw;
+  } catch {
+    return raw;
   }
 }
 
-$('#install-url-btn').onclick = async () => {
-  const url = $('#custom-url').value.trim();
-  if (!url) return;
-  try {
-    const res = await api('/catalog/install', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url })
-    });
-    notify(`Installed ${res.installed || 'plugin'}`);
-    $('#custom-url').value = '';
-    await loadPlugins();
-    if (activeTab === 'catalog') loadCatalog();
-  } catch (err) {
-    notify(`Install failed: ${err.message}`, true);
-  }
-};
-
-async function loadUpdates() {
-  try {
-    const st = await api('/update');
-    const lines = [`Current version: ${st.version}`];
-    if (st.busy) lines.push('Status: working…');
-    if (st.status) lines.push(`Detail: ${st.status}`);
-    if (st.found) {
-      if (st.found.loader) lines.push(`Newer Sunbird build: ${st.found.loader} (restart Sunbird to update)`);
-      if (st.found.plugins.length) lines.push(`Plugin updates: ${st.found.plugins.join(', ')}`);
-    } else {
-      lines.push('Up to date.');
-    }
-    $('#update-box').innerHTML = lines.map((l) => `<div>${esc(l)}</div>`).join('');
-    $('#apply-update-btn').disabled = !st.found || !st.found.plugins.length || st.busy;
-    return st;
-  } catch (err) {
-    setConnected(false, err.message);
-    return null;
-  }
-}
-
-async function pollUpdateUntilDone(refreshPlugins) {
-  for (let i = 0; i < 15; i++) {
-    await new Promise((r) => setTimeout(r, 700));
-    const st = await loadUpdates();
-    if (!st || !st.busy) break;
-  }
-  if (refreshPlugins) loadPlugins();
-}
-
-$('#check-update-btn').onclick = async () => {
-  try {
-    await api('/update/check', { method: 'POST' });
-    notify('Checking for updates…');
-    pollUpdateUntilDone(false);
-  } catch (err) {
-    notify(`Check failed: ${err.message}`, true);
-  }
-};
-$('#apply-update-btn').onclick = async () => {
-  try {
-    await api('/update/apply', { method: 'POST' });
-    notify('Applying plugin updates…');
-    pollUpdateUntilDone(true);
-  } catch (err) {
-    notify(`Apply failed: ${err.message}`, true);
-  }
-};
-
-async function loadLogs() {
-  try {
-    const text = await api('/logs', {}, true);
-    const out = $('#logs-out');
-    out.textContent = text || '(no logs yet)';
-    out.scrollTop = out.scrollHeight;
-  } catch (err) {
-    setConnected(false, err.message);
-  }
-}
-$('#logs-refresh-btn').onclick = loadLogs;
-
-async function runEval() {
-  const code = $('#eval-input').value;
+async function run() {
+  const code = prompt.value;
   if (!code.trim()) return;
-  const out = $('#eval-out');
-  out.classList.remove('hidden');
-  try {
-    const raw = await api('/eval', { method: 'POST', body: code }, true);
-    try {
-      const parsed = JSON.parse(raw);
-      out.textContent = typeof parsed === 'object' && parsed !== null
-        ? JSON.stringify(parsed, null, 2)
-        : raw;
-    } catch {
-      out.textContent = raw;
-    }
-  } catch (err) {
-    out.textContent = 'Error: ' + err.message;
-  }
-  loadLogs();
+  if (past[past.length - 1] !== code) past.push(code);
+  past = past.slice(-100);
+  at = past.length;
+  try { localStorage.setItem('sunbird.past', JSON.stringify(past)); } catch {}
+  prompt.value = '';
+  grow();
+  // The result reaches the view through the log, like every other line.
+  await api('/eval', { method: 'POST', body: code }).catch(() => {});
+  await poll();
 }
-$('#eval-run-btn').onclick = runEval;
-$('#eval-input').addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-    e.preventDefault();
-    runEval();
-  }
-});
 
-async function openDialog(kind) {
-  const text = $('#dialog-text').value;
-  const payload = {
-    title: $('#dialog-title').value.trim(),
-    options: $('#dialog-options').value.split('\n').map((line) => line.trim()).filter(Boolean),
-    monospace: $('#dialog-mono').checked,
-    highlight: $('#dialog-highlight').checked
-  };
-  payload[kind === 'choose' ? 'message' : 'text'] = text;
-  $('#dialog-result').textContent = 'Waiting for the dialog…';
-  try {
-    const res = await api('/ui/' + kind, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    $('#dialog-result').textContent = res.index < 0 ? 'Dismissed' : 'Picked option ' + res.index;
-  } catch (err) {
-    $('#dialog-result').textContent = 'Failed: ' + err.message;
-  }
+function grow() {
+  prompt.style.height = 'auto';
+  prompt.style.height = prompt.scrollHeight + 'px';
 }
-$('#dialog-choose-btn').onclick = () => openDialog('choose');
-$('#dialog-sheet-btn').onclick = () => openDialog('sheet');
 
-function openTabFromHash() {
-  const hash = location.hash.replace(/^#/, '');
-  if (['plugins', 'catalog', 'updates', 'console', 'dialogs'].includes(hash)) {
-    switchTab(hash);
-    if (hash !== 'plugins') loadPlugins();
+prompt.addEventListener('input', grow);
+prompt.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    run();
     return;
   }
-  loadPlugins();
+  const first = !prompt.value.slice(0, prompt.selectionStart).includes('\n');
+  const last = !prompt.value.slice(prompt.selectionEnd).includes('\n');
+  if (event.key === 'ArrowUp' && first && at > 0) {
+    event.preventDefault();
+    prompt.value = past[--at];
+    grow();
+  } else if (event.key === 'ArrowDown' && last && at < past.length) {
+    event.preventDefault();
+    at += 1;
+    prompt.value = past[at] ?? '';
+    grow();
+  }
+});
+
+for (const button of document.querySelectorAll('.levels button')) {
+  button.onclick = () => {
+    level = button.dataset.level;
+    for (const other of document.querySelectorAll('.levels button')) {
+      other.setAttribute('aria-pressed', String(other === button));
+    }
+    refilter();
+  };
 }
-window.addEventListener('hashchange', openTabFromHash);
-openTabFromHash();
+function refilter() {
+  for (const row of view.children) row.classList.toggle('hidden', !visible(row));
+}
+$('filter').addEventListener('input', refilter);
+$('clear').onclick = () => { view.replaceChildren(); };
+$('reload').onclick = async () => {
+  try {
+    await api('/plugins/reload-all', { method: 'POST' });
+    add('note', '', 'Reloaded every plugin');
+  } catch (err) {
+    add('result failed', '', 'Reload failed: ' + err.message);
+  }
+};
+
+poll();
+setInterval(() => { if (!document.hidden) poll(); }, 1500);
+prompt.focus();
 </script>
 </body>
 </html>

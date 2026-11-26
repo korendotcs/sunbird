@@ -16,11 +16,13 @@
 !.github/
 !.github/workflows/
 !.github/workflows/*.yml
+!.github/dependabot.yml
 
 !crates/
 !crates/*/
 !crates/*/Cargo.toml
 !crates/*/build.rs
+!crates/loader/winres.rs
 !crates/*/src/
 !crates/*/src/**/
 !crates/*/src/**/*.rs
@@ -67,3 +69,6 @@
 !web/plugins/
 !web/plugins/frida-*.js
 !web/plugins/frida-gadget-*.so.gz
+!web/plugins/platform-indicators/
+!web/plugins/platform-indicators/*.svg
+!web/plugins/platform-indicators/*.png

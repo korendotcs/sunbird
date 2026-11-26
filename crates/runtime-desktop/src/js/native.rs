@@ -276,8 +276,8 @@ pub fn object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
 }
 
 /// `phoenix.native.hook`, on `phoenix_hook::x86::observe`, which saves the
-/// Win64 argument registers.
-#[cfg(windows)]
+/// argument registers.
+#[cfg(any(windows, target_os = "linux"))]
 mod observe {
    use std::{
       cell::Cell,
@@ -330,7 +330,7 @@ mod observe {
    pub struct Hit {
       hook:   usize,
       at:     String,
-      /// `rcx`, `rdx`, `r8` and `r9`.
+      /// The first four integer argument registers.
       args:   [String; 4],
       /// The first bytes behind each argument that points at readable memory.
       peek:   [Option<String>; 4],
@@ -456,9 +456,8 @@ mod observe {
    }
 }
 
-/// `phoenix.native.hook` until `phoenix_hook::x86::observe` saves SysV
-/// argument registers.
-#[cfg(not(windows))]
+/// `phoenix.native.hook` where `phoenix_hook::x86::observe` has no stub.
+#[cfg(not(any(windows, target_os = "linux")))]
 mod observe {
    use phoenix_hook::image::Image;
 

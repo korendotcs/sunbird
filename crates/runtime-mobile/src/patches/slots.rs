@@ -2,7 +2,13 @@
 
 use std::collections::HashSet;
 
-use phoenix_ui_mobile::Op;
+use phoenix_ui_mobile::{
+   Op,
+   Prop,
+   ViewKind,
+   prop,
+};
+use phoenix_wire::Value;
 
 use crate::patches::{
    Before,
@@ -32,6 +38,7 @@ impl Patches {
             .into_iter()
             .partition::<Vec<_>, _>(|slot| slot.parent == *id);
          self.slots = kept;
+         self.grown.remove(id);
          for slot in gone {
             if let SlotKind::Menu(menu) = slot.kind
                && let Some(answer) = self.menus.remove(&menu)
@@ -79,6 +86,20 @@ impl Patches {
          slot.before = before;
          return None;
       }
+      if target == Target::Member
+         && let Some(name) = Target::stretched_name(&self.mirror, id, &aid)
+      {
+         // The name stops growing and the slot grows in its place, so the
+         // decorations follow the name and the time stays at the end.
+         self.grown.insert(placement.parent);
+         self.late.push(Op::Update {
+            id:    name,
+            props: vec![
+               (prop!("flex"), Value::F64(0.0)),
+               (prop!("shrink"), Value::Bool(true)),
+            ],
+         });
+      }
       self.slots.push(Slot {
          kind: SlotKind::Target(target),
          anchor: id,
@@ -122,6 +143,24 @@ impl Patches {
          .draw(target, &contributions, &place, &|contribution| {
             self.results.get(&(contribution.id, place.clone())).cloned()
          });
+      let drafts = if self.grown.contains(&self.slots[index].parent) {
+         vec![Draft {
+            kind:  ViewKind::View,
+            props: vec![
+               (prop!("direction"), Value::Str("row".to_owned())),
+               (prop!("flex"), Value::F64(1.0)),
+               (prop!("minWidth"), Value::F64(0.0)),
+               (prop!("gap"), Value::F64(4.0)),
+               (prop!("align"), Value::Str("center".to_owned())),
+               (Prop::PADDING, Value::Rect([4.0, 0.0, 0.0, 0.0])),
+            ],
+            kids:  drafts,
+            press: None,
+            src:   None,
+         }]
+      } else {
+         drafts
+      };
       let mut roots = Vec::new();
       let mut all = Vec::new();
       for mut draft in drafts {
@@ -248,7 +287,9 @@ impl Patches {
             touched.insert(parent);
          }
       }
-      self.finish(out, touched, deletes)
+      let mut ops = self.finish(out, touched, deletes);
+      ops.append(&mut self.late);
+      ops
    }
 
    /// Records a plugin's answer and redraws the slots it was for.

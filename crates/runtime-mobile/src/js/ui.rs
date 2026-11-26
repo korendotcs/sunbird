@@ -232,6 +232,7 @@ fn outcome_of(target: Target, value: Option<&Value<'_>>) -> Outcome {
             text:  text.to_string().ok()?,
             color: None,
             tint:  None,
+            icons: Vec::new(),
          });
       }
       if let Some(object) = value.as_object() {
@@ -254,12 +255,22 @@ fn outcome_of(target: Target, value: Option<&Value<'_>>) -> Outcome {
                .unwrap_or_default(),
             color: argb("color"),
             tint:  argb("tint"),
+            // Phoenix's images take no SVG, so only icons with a `uri` draw.
+            icons: object
+               .get::<_, Option<Vec<Object<'_>>>>("icons")
+               .ok()
+               .flatten()
+               .unwrap_or_default()
+               .iter()
+               .filter_map(|icon| icon.get::<_, Option<String>>("uri").ok().flatten())
+               .collect(),
          });
       }
       Some(Rendered {
          text:  value.as_number()?.to_string(),
          color: None,
          tint:  None,
+         icons: Vec::new(),
       })
    });
    Outcome::Text(rendered)
@@ -300,6 +311,12 @@ pub fn remover<'js>(
                let at = arg
                   .0
                   .and_then(|value| value.as_string().and_then(|text| text.to_string().ok()));
+               if target.decorates()
+                  && let Some(user) = &at
+               {
+                  patches::update_user(id, user);
+                  return;
+               }
                let place = at.map(|at| {
                   if target == Target::Tab {
                      Place::User(Some(at))
@@ -325,6 +342,8 @@ pub fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'
       ("addMessageAction", Target::Action),
       ("addProfileSection", Target::Profile),
       ("addProfileTab", Target::Tab),
+      ("addMemberDecoration", Target::Member),
+      ("addMessageHeaderDecoration", Target::Author),
    ] {
       let name = plugin.to_owned();
       ui.set(
@@ -498,7 +517,9 @@ fn add_contribution<'js>(
    };
    let needs = match target {
       Target::Header | Target::Composer | Target::Action => (label.is_some(), "label and onPress"),
-      Target::Content | Target::Timestamp => (evaluate.is_some(), "render"),
+      Target::Content | Target::Timestamp | Target::Member | Target::Author => {
+         (evaluate.is_some(), "render")
+      },
       Target::Profile | Target::Tab | Target::TabPage => {
          (label.is_some() && evaluate.is_some(), "title and render")
       },

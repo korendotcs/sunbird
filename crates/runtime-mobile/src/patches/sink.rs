@@ -309,6 +309,7 @@ impl Patches {
       for (pager, index) in splice.recolor {
          out.extend(self.rust_label_colors(pager, index));
       }
+      out.append(&mut self.late);
       Some(out)
    }
 

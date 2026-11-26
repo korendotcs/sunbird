@@ -36,11 +36,14 @@ use phoenix_sigs::desktop::{
    layout,
 };
 
-use crate::gpui::{
-   self,
-   RcFnVtbl,
-   Scratch,
-   SharedString,
+use crate::{
+   double_click,
+   gpui::{
+      self,
+      RcFnVtbl,
+      Scratch,
+      SharedString,
+   },
 };
 
 /// `Vec<MenuItem>` in Discord's Rust ABI (`[cap, ptr, len]`).
@@ -82,6 +85,8 @@ struct MenuSymbols {
    with_color:        WithColorFn,
    vec_push:          VecPushFn,
    layout:            MenuLayout,
+   /// Where `with_id` keeps a short id inline, its length byte first.
+   id_offset:         Option<usize>,
 }
 
 // SAFETY: function pointers and plain struct offsets into `Discord.exe`.
@@ -267,7 +272,12 @@ pub fn install(image: &Image<'static>) {
          with_color:        std::mem::transmute::<usize, WithColorFn>(menu.with_color),
          vec_push:          std::mem::transmute::<usize, VecPushFn>(menu.vec_push),
          layout:            menu.layout,
+         id_offset:         None,
       }
+   };
+   let syms = MenuSymbols {
+      id_offset: inline_id_offset(&syms),
+      ..syms
    };
    let _ = MENU_SYMS.set(syms);
    log::info!(
@@ -298,7 +308,8 @@ unsafe extern "C" fn build_context_menu_detour(
 
    // Read `message_id` and `channel_id` BEFORE calling `orig_build`, because
    // `MessageContextMenu` takes `input` by value and drops it before returning.
-   let (message_id, channel_id) = if ACTIVE_COUNT.load(Ordering::Acquire) > 0 && !input.is_null() {
+   let wanted = ACTIVE_COUNT.load(Ordering::Acquire) > 0 || double_click::pending();
+   let (message_id, channel_id) = if wanted && !input.is_null() {
       // SAFETY: `input` is a live `MessageContextMenuInput`; offsets were
       // decoded from `MessageContextMenu` and its permission check callee.
       unsafe {
@@ -325,6 +336,14 @@ unsafe extern "C" fn build_context_menu_detour(
 
    // SAFETY: forwards all arguments verbatim to the original menu builder.
    let out = unsafe { (syms.orig_build)(sret, input, a2, a3, s0, s1, s2, s3) };
+
+   if !sret.is_null()
+      && let Some(item) = double_click::take_press(message_id)
+   {
+      let _ = std::panic::catch_unwind(|| {
+         press_item(syms, sret, &item, a3 as *mut c_void, s2 as *mut c_void);
+      });
+   }
 
    if message_id == 0 || sret.is_null() || ACTIVE_COUNT.load(Ordering::Acquire) == 0 {
       return out;
@@ -458,5 +477,70 @@ fn append_plugin_actions(
 
          (syms.vec_push)(vec, &raw mut item);
       }
+   }
+}
+
+/// Finds where `with_id` stores a short id by giving one to a blank action
+/// item. The id moves with the item's variant.
+fn inline_id_offset(syms: &MenuSymbols) -> Option<usize> {
+   const PROBE: &[u8] = b"zq";
+   let mut blank = RawMenuItem::zeroed();
+   blank.put(0, syms.layout.action_tag);
+   let mut named = RawMenuItem::zeroed();
+   // SAFETY: `with_id` reads one item and writes one into buffers that fit
+   // it. A two-byte id stays inline, so `named` owns nothing to free.
+   unsafe { (syms.with_id)(&raw mut named, &raw mut blank, PROBE.as_ptr(), PROBE.len()) };
+   // SAFETY: `named` is `SCRATCH_CAP` bytes, which `layout.size` fits.
+   let bytes = unsafe { std::slice::from_raw_parts(named.as_mut_ptr(), syms.layout.size) };
+   bytes
+      .windows(PROBE.len() + 1)
+      .position(|window| window[0] as usize == PROBE.len() && &window[1..] == PROBE)
+}
+
+/// Runs the click handler of the item with id `id` in the menu `vec`, with
+/// the builder's window and app. Pressing an item inside the builder leaves
+/// the menu unshown, the same as a click on it.
+fn press_item(
+   syms: &MenuSymbols,
+   vec: *mut RawMenuVec,
+   id: &str,
+   window: *mut c_void,
+   app: *mut c_void,
+) {
+   type CallFn = unsafe extern "C" fn(*const u8, *const u8, *mut c_void, *mut c_void);
+
+   let (Some(id_at), Ok(len)) = (syms.id_offset, u8::try_from(id.len())) else {
+      return;
+   };
+   let at = &syms.layout;
+   // SAFETY: `vec` is the `Vec<MenuItem>` the builder just returned, items
+   // `at.size` bytes apart.
+   let items = unsafe { std::slice::from_raw_parts((*vec).ptr.cast::<u8>(), (*vec).len * at.size) };
+   let Some(item) = items.chunks_exact(at.size).find(|item| {
+      item.get(id_at) == Some(&len)
+         && item.get(id_at + 1..id_at + 1 + id.len()) == Some(id.as_bytes())
+   }) else {
+      log::warn!("double click: the menu has no {id:?}");
+      return;
+   };
+   let word = |offset: usize| {
+      item.get(offset..offset + 8).map_or(0, |bytes| {
+         usize::from_le_bytes(bytes.try_into().unwrap_or_default())
+      })
+   };
+   let (rc, vtbl) = (word(at.on_click), word(at.on_click + 8) as *const RcFnVtbl);
+   if word(0) as u64 != at.action_tag || word(at.on_click_tag) != 0 || rc == 0 || vtbl.is_null() {
+      return;
+   }
+   // The handler takes the app behind one more pointer than the builder gets
+   // it, and no event. Passing the builder's app directly segfaults.
+   let mut app = app;
+   // SAFETY: an `Rc<dyn Fn>` Discord built, whose value follows the two counts
+   // at the vtable's alignment.
+   unsafe {
+      let align = (*vtbl).align.max(1);
+      let value = (rc + 16usize.div_ceil(align) * align) as *const u8;
+      let call = std::mem::transmute::<*const c_void, CallFn>((*vtbl).call);
+      call(value, ptr::null(), window, (&raw mut app).cast());
    }
 }

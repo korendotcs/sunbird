@@ -161,6 +161,8 @@ impl Platform for Mobile {
    }
 
    fn started(&self, _first_run: bool, _plugins: &[String]) {
+      // The shell is a saved setting here, so it comes back on at launch.
+      phoenix_runtime::remote::ensure_started();
       #[cfg(target_os = "android")]
       if let Some(state) = phoenix_runtime::state() {
          loader::forget_update(&state.files_dir());

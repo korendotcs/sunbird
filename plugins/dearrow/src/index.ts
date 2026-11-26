@@ -1,5 +1,5 @@
 // @description Replaces YouTube titles and thumbnails in embeds using DeArrow
-// @version 0.1.1
+// @version 0.2.0
 // @author amaanq
 
 const { gateway } = phoenix;
@@ -67,11 +67,10 @@ const lookup = (id: string) => {
   return pending;
 };
 
-const rebrand = async (message: Phoenix.GatewayMessage) => {
-  const embeds = message.embeds;
-  if (!embeds?.length) return;
+// Rewrites the YouTube embeds in place, and says whether any changed.
+const apply = async (embeds: Phoenix.Embed[] | undefined) => {
   let changed = false;
-  for (const embed of embeds) {
+  for (const embed of embeds ?? []) {
     const id = videoId(embed.url);
     if (!id) continue;
     const { title, thumbnail } = await lookup(id);
@@ -84,7 +83,12 @@ const rebrand = async (message: Phoenix.GatewayMessage) => {
       changed = true;
     }
   }
-  if (!changed) return;
+  return changed;
+};
+
+const rebrand = async (message: Phoenix.GatewayMessage) => {
+  const embeds = message.embeds;
+  if (!(await apply(embeds))) return;
   phoenix.enqueue(gateway.messageUpdate, {
     id: message.id,
     channel_id: message.channel_id,
@@ -95,3 +99,12 @@ const rebrand = async (message: Phoenix.GatewayMessage) => {
 
 phoenix.on(gateway.messageCreate, rebrand);
 phoenix.on(gateway.messageUpdate, rebrand);
+
+// Desktop loads message history over HTTP, past the gateway.
+phoenix.discord.onResponse({ method: "GET", pathPrefix: "/channels/", pathSuffix: "/messages" }, async (res) => {
+  if (res.status !== 200 || !/youtu\.?be/.test(res.body)) return;
+  const messages = res.json<Phoenix.GatewayMessage[]>();
+  if (!Array.isArray(messages)) return;
+  const changed = await Promise.all(messages.map((message) => apply(message.embeds)));
+  if (changed.some(Boolean)) return { body: JSON.stringify(messages) };
+});

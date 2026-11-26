@@ -1,12 +1,12 @@
-//! x86-64 disassembly, and on Windows live entry hooks that report a call's
-//! argument registers, for the debug tools.
+//! x86-64 disassembly, and on Windows and Linux live entry hooks that report a
+//! call's argument registers, for the debug tools.
 
 #[cfg(any(windows, target_os = "linux"))]
 use std::ffi::c_void;
 use std::ops::Range;
 
 pub use iced_x86::Register;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use iced_x86::{
    BlockEncoder,
    BlockEncoderOptions,
@@ -22,14 +22,14 @@ use iced_x86::{
 };
 
 use crate::image::Image;
-#[cfg(windows)]
+#[cfg(windows)] use crate::image::win32;
+#[cfg(any(windows, target_os = "linux"))]
 use crate::{
    Error,
    image::{
       ABSOLUTE_JUMP_LEN,
       absolute_jump,
       alloc_exec,
-      win32,
    },
 };
 
@@ -250,6 +250,302 @@ impl Constants {
    }
 }
 
+/// What a function does with the struct its `index`th argument points at.
+///
+/// Like [`sret_stores`], control flow is followed linearly, so a use after the
+/// pointer's register is reused is missed and never misread. Unlike it,
+/// decoding runs past each `ret` to the end of `code`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ArgUse {
+   /// The end of the furthest read or write through the pointer.
+   pub extent:     usize,
+   /// Each call, with the struct offset each of the first four argument
+   /// registers stands for: `lea reg, [ptr+offset]`, or a slot `reg` points
+   /// at that a 16-byte move filled from `[ptr+offset]`.
+   pub calls:      Vec<[Option<usize>; 4]>,
+   /// `rep movsb` copies out of the struct.
+   pub copies:     Vec<StructCopy>,
+   /// Offsets whose value indexes a jump table.
+   pub dispatches: Vec<usize>,
+}
+
+/// A `rep movsb` out of the struct [`arg_use`] follows.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StructCopy {
+   pub offset:      usize,
+   pub len:         usize,
+   /// How many calls come before it.
+   pub after_calls: usize,
+}
+
+/// What a register holds, as the struct offset it relates to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holds {
+   /// A pointer to the field at this offset.
+   Pointer(usize),
+   /// The value of the field at this offset.
+   Value(usize),
+   /// A pointer to a slot copied from the field at this offset.
+   Slot(usize),
+}
+
+/// The registers [`arg_use`] follows, and what it found so far.
+struct ArgTracker {
+   held:     Vec<(Register, Holds)>,
+   constant: Vec<(Register, u64)>,
+   /// Frame slots `[rsp|rbp+displacement]` a held register was saved to.
+   spilled:  Vec<((Register, u64), Holds)>,
+   found:    ArgUse,
+}
+
+impl ArgTracker {
+   /// Larger displacements are globals or stack slots, not struct fields.
+   const FIELD_LIMIT: u64 = 0x1000;
+
+   fn holds(&self, register: Register) -> Option<Holds> {
+      let register = register.full_register();
+      self
+         .held
+         .iter()
+         .find(|(held, _)| *held == register)
+         .map(|&(_, holds)| holds)
+   }
+
+   fn pointer(&self, register: Register) -> Option<usize> {
+      match self.holds(register)? {
+         Holds::Pointer(offset) => Some(offset),
+         _ => None,
+      }
+   }
+
+   fn value(&self, register: Register) -> Option<usize> {
+      match self.holds(register)? {
+         Holds::Value(offset) => Some(offset),
+         _ => None,
+      }
+   }
+
+   /// The struct offset `[base+displacement]` reaches, when `base` points
+   /// into it.
+   fn field(&self, base: Register, displacement: u64) -> Option<usize> {
+      (displacement < Self::FIELD_LIMIT)
+         .then(|| Some(self.pointer(base)? + addr(displacement)))
+         .flatten()
+   }
+
+   /// The struct offset of `instruction`'s memory operand, and which operand
+   /// it is.
+   fn memory_field(&self, instruction: &Instruction) -> Option<(u32, usize)> {
+      use iced_x86::OpKind;
+      let operand =
+         (0..instruction.op_count()).find(|&op| instruction.op_kind(op) == OpKind::Memory)?;
+      (instruction.memory_index() == Register::None)
+         .then(|| {
+            self.field(
+               instruction.memory_base(),
+               instruction.memory_displacement64(),
+            )
+         })
+         .flatten()
+         .map(|offset| (operand, offset))
+   }
+
+   fn call(&mut self, abi: Abi) {
+      let stands_for = |register| {
+         match self.holds(register)? {
+            Holds::Pointer(offset) | Holds::Slot(offset) => Some(offset),
+            Holds::Value(_) => None,
+         }
+      };
+      let args = [0, 1, 2, 3].map(|arg| stands_for(abi.arg(arg)));
+      self.found.calls.push(args);
+      self
+         .held
+         .retain(|(register, _)| !abi.volatile().contains(register));
+      self
+         .constant
+         .retain(|(register, _)| !abi.volatile().contains(register));
+   }
+
+   /// Follows a held register through a frame slot: Windows builds keep the
+   /// pointer on the stack across calls and reload it before each use.
+   fn spill(&mut self, instruction: &Instruction) -> Option<(Register, Holds)> {
+      use iced_x86::{
+         Code,
+         OpKind,
+      };
+      let base = instruction.memory_base();
+      if instruction.memory_index() != Register::None
+         || !matches!(base, Register::RSP | Register::RBP)
+      {
+         return None;
+      }
+      let slot = (base, instruction.memory_displacement64());
+      if instruction.op0_kind() == OpKind::Memory {
+         self.spilled.retain(|(held, _)| *held != slot);
+         if instruction.code() == Code::Mov_rm64_r64
+            && let Some(holds) = self.holds(instruction.op1_register())
+         {
+            self.spilled.push((slot, holds));
+         }
+         return None;
+      }
+      (instruction.code() == Code::Mov_r64_rm64)
+         .then(|| self.spilled.iter().find(|(held, _)| *held == slot))
+         .flatten()
+         .map(|&(_, holds)| (instruction.op0_register().full_register(), holds))
+   }
+
+   /// What `instruction` makes its first operand hold, and the copies and
+   /// dispatches it shows.
+   fn step(&mut self, instruction: &Instruction) -> Option<(Register, Holds)> {
+      use iced_x86::{
+         Code,
+         Mnemonic,
+         OpKind,
+      };
+      let target = (instruction.op0_kind() == OpKind::Register)
+         .then(|| instruction.op0_register().full_register());
+      let sixteen = matches!(
+         instruction.mnemonic(),
+         Mnemonic::Movups | Mnemonic::Movaps | Mnemonic::Movdqu | Mnemonic::Movdqa
+      );
+      match (
+         instruction.mnemonic(),
+         self.memory_field(instruction),
+         target,
+      ) {
+         (Mnemonic::Lea, Some((1, offset)), Some(target)) => Some((target, Holds::Pointer(offset))),
+         (Mnemonic::Mov, Some((1, offset)), Some(target))
+            if instruction.code() == Code::Mov_r64_rm64 =>
+         {
+            Some((target, Holds::Value(offset)))
+         },
+         (Mnemonic::Mov, None, Some(target))
+            if matches!(instruction.code(), Code::Mov_r64_rm64 | Code::Mov_rm64_r64)
+               && instruction.op1_kind() == OpKind::Register =>
+         {
+            Some((target, self.holds(instruction.op1_register())?))
+         },
+         (_, Some((1, offset)), Some(target)) if sixteen => Some((target, Holds::Value(offset))),
+         (..)
+            if sixteen
+               && instruction.op0_kind() == OpKind::Memory
+               && instruction.memory_displacement64() == 0
+               && instruction.memory_index() == Register::None =>
+         {
+            let offset = self.value(instruction.op1_register())?;
+            Some((
+               instruction.memory_base().full_register(),
+               Holds::Slot(offset),
+            ))
+         },
+         (Mnemonic::Movsxd, ..) => {
+            let offset = self.value(instruction.memory_index())?;
+            self.found.dispatches.push(offset);
+            None
+         },
+         (Mnemonic::Movsb, ..) if instruction.has_rep_prefix() => {
+            let offset = self.pointer(Register::RSI)?;
+            let &(_, len) = self
+               .constant
+               .iter()
+               .find(|(register, _)| *register == Register::RCX)?;
+            self.found.copies.push(StructCopy {
+               offset,
+               len: addr(len),
+               after_calls: self.found.calls.len(),
+            });
+            None
+         },
+         _ => None,
+      }
+   }
+}
+
+/// Reads [`ArgUse`] for the struct the `index`th argument points at in `code`
+/// at `ip`.
+#[must_use]
+pub fn arg_use(abi: Abi, index: usize, code: &[u8], ip: usize) -> ArgUse {
+   use iced_x86::{
+      InstructionInfoFactory,
+      Mnemonic,
+      OpAccess,
+      OpKind,
+   };
+
+   let mut decoder = Decoder::with_ip(64, code, ip as u64, DecoderOptions::NONE);
+   let mut factory = InstructionInfoFactory::new();
+   let mut constants = Constants::default();
+   let mut tracker = ArgTracker {
+      held:     vec![(abi.arg(index), Holds::Pointer(0))],
+      constant: Vec::new(),
+      spilled:  Vec::new(),
+      found:    ArgUse::default(),
+   };
+   while decoder.can_decode() {
+      let instruction = decoder.decode();
+      if instruction.is_invalid() {
+         break;
+      }
+      if instruction.mnemonic() == Mnemonic::Call {
+         tracker.call(abi);
+         continue;
+      }
+      let info = factory.info(&instruction);
+      for memory in info.used_memory() {
+         if memory.index() == Register::None
+            && let Some(offset) = tracker.field(memory.base(), memory.displacement())
+         {
+            tracker.found.extent = tracker
+               .found
+               .extent
+               .max(offset + memory.memory_size().size());
+         }
+      }
+      let new = tracker
+         .spill(&instruction)
+         .or_else(|| tracker.step(&instruction));
+      let loaded = constants.loaded(&instruction);
+      let written = info
+         .used_registers()
+         .iter()
+         .filter(|used| {
+            matches!(
+               used.access(),
+               OpAccess::Write
+                  | OpAccess::CondWrite
+                  | OpAccess::ReadWrite
+                  | OpAccess::ReadCondWrite
+            )
+         })
+         .map(|used| used.register().full_register())
+         .collect::<Vec<_>>();
+      tracker
+         .held
+         .retain(|(register, _)| !written.contains(register));
+      tracker
+         .constant
+         .retain(|(register, _)| !written.contains(register));
+      // A moved frame base, a push among them, leaves its slots elsewhere.
+      tracker
+         .spilled
+         .retain(|((base, _), _)| !written.contains(base));
+      if let Some(new) = new {
+         tracker.held.retain(|(register, _)| *register != new.0);
+         tracker.held.push(new);
+      }
+      if let Some(value) = loaded
+         && instruction.op0_kind() == OpKind::Register
+      {
+         tracker
+            .constant
+            .push((instruction.op0_register().full_register(), value));
+      }
+   }
+   tracker.found
+}
+
 /// The `(offset, size)` stores a function makes through its hidden return
 /// pointer, the first argument register on entry.
 ///
@@ -429,7 +725,8 @@ pub fn debug_fields(abi: Abi, code: &[u8], ip: usize) -> Vec<DebugField> {
             }
          },
          (Mnemonic::Add, Some(_)) if to_this => {
-            // A register, a negative or an overflowing step loses track of `self`.
+            // A register, a negative or an overflowing step loses track of
+            // `self`.
             if let Some(sum) = ins
                .try_immediate(1)
                .ok()
@@ -732,24 +1029,49 @@ impl Regs {
    }
 }
 
+/// The registers at a hooked function's entry, as the stub saved them. `rax`
+/// carries the vector register count into variadic functions.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+pub struct Regs {
+   pub r9:  u64,
+   pub r8:  u64,
+   pub rcx: u64,
+   pub rdx: u64,
+   pub rsi: u64,
+   pub rdi: u64,
+   pub rax: u64,
+   /// The caller's return address.
+   pub ret: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl Regs {
+   /// The first four integer arguments, `rdi`, `rsi`, `rdx` and `rcx`.
+   #[must_use]
+   pub const fn args(&self) -> [u64; 4] {
+      [self.rdi, self.rsi, self.rdx, self.rcx]
+   }
+}
+
 /// Called on every entry of an observed function, on the caller's thread,
 /// with the context passed to [`observe`]. It must not unwind.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub type Observer = extern "C" fn(ctx: usize, regs: &Regs);
 
 /// A function [`observe`] redirects through its stub.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub struct Observed {
    addr:     usize,
    original: [u8; ABSOLUTE_JUMP_LEN],
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 const STUB_PAGE: usize = 0x1000;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 const TRAMPOLINE_AT: usize = 0x100;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 impl Observed {
    #[must_use]
    pub const fn addr(&self) -> usize {
@@ -780,7 +1102,7 @@ impl Observed {
 ///
 /// `addr` starts a function of `image` that nothing branches back into within
 /// its first 14 bytes, and no thread is paused inside those bytes.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub unsafe fn observe(
    image: &Image<'static>,
    addr: usize,
@@ -858,7 +1180,7 @@ pub unsafe fn observe(
 
 /// Writes 14 bytes at a function entry other threads may be calling: first a
 /// `jmp $` that parks them, then the tail, then the head.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 unsafe fn hot_patch(
    image: &Image<'static>,
    addr: usize,
@@ -871,6 +1193,28 @@ unsafe fn hot_patch(
       image.write_code(addr + 2, &bytes[2..])?;
       image.write_code(addr, &bytes[..2])
    }
+}
+
+/// A fresh executable page within reach of RIP-relative operands at `addr`.
+/// The kernel takes the address as a hint, so a page it put elsewhere goes
+/// back.
+#[cfg(target_os = "linux")]
+fn alloc_near(addr: usize) -> Option<usize> {
+   const STEP: usize = 0x1_0000;
+   const REACH: usize = 0x7000_0000;
+   let home = addr & !(STEP - 1);
+   (1..REACH / STEP)
+      .flat_map(|step| [home.checked_sub(step * STEP), home.checked_add(step * STEP)])
+      .flatten()
+      .find_map(|candidate| {
+         let got = alloc_exec(candidate, STUB_PAGE)?;
+         if got.abs_diff(addr) < REACH {
+            return Some(got);
+         }
+         // SAFETY: the fresh mapping nothing else uses.
+         unsafe { libc::munmap(got as *mut c_void, STUB_PAGE) };
+         None
+      })
 }
 
 /// A fresh executable page within reach of RIP-relative operands at `addr`.
@@ -888,6 +1232,36 @@ fn alloc_near(addr: usize) -> Option<usize> {
       })
       .flatten()
       .find_map(|candidate| alloc_exec(candidate, STUB_PAGE))
+}
+
+/// Saves the argument registers and `rax`, calls `observer(ctx, &regs)` on a
+/// 16-byte aligned stack, restores them and jumps to `trampoline`.
+#[cfg(target_os = "linux")]
+fn stub(observer: Observer, ctx: usize, trampoline: usize) -> Vec<u8> {
+   // push rax, rdi, rsi, rdx, rcx, r8, r9; sub rsp, 0x80
+   let mut code = vec![
+      0x50, 0x57, 0x56, 0x52, 0x51, 0x41, 0x50, 0x41, 0x51, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00,
+   ];
+   for xmm in 0..8u8 {
+      // movdqu [rsp + xmm * 16], xmmN
+      code.extend([0xF3, 0x0F, 0x7F, 0x44 | xmm << 3, 0x24, xmm * 16]);
+   }
+   code.extend([0x48, 0x8D, 0xB4, 0x24, 0x80, 0x00, 0x00, 0x00]); // lea rsi, [rsp+0x80]
+   code.extend([0x48, 0xBF]); // mov rdi, imm64
+   code.extend(ctx.to_le_bytes());
+   code.extend([0x48, 0xB8]); // mov rax, imm64
+   code.extend((observer as usize).to_le_bytes());
+   code.extend([0xFF, 0xD0]); // call rax
+   for xmm in 0..8u8 {
+      // movdqu xmmN, [rsp + xmm * 16]
+      code.extend([0xF3, 0x0F, 0x6F, 0x44 | xmm << 3, 0x24, xmm * 16]);
+   }
+   // add rsp, 0x80; pop r9, r8, rcx, rdx, rsi, rdi, rax
+   code.extend([
+      0x48, 0x81, 0xC4, 0x80, 0x00, 0x00, 0x00, 0x41, 0x59, 0x41, 0x58, 0x59, 0x5A, 0x5E, 0x5F, 0x58,
+   ]);
+   code.extend(absolute_jump(trampoline));
+   code
 }
 
 /// Saves the argument registers, calls `observer(ctx, &regs)` on a 16-byte
@@ -945,6 +1319,92 @@ mod tests {
          (8, 8),
          (0, 0x40)
       ]);
+   }
+
+   #[test]
+   fn arg_use_reads_send_in_the_linux_build_from_2026_11_23() {
+      // Pieces of `ReqwestTransport::send` from the build whose request grew
+      // past 0xF0 bytes.
+      let code = [
+         0x48, 0x89, 0xF3, // mov rbx, rsi
+         0xE8, 0x00, 0x00, 0x00, 0x00, // call
+         0x48, 0x8B, 0x83, 0x08, 0x01, 0x00, 0x00, // mov rax, [rbx+0x108]
+         0x48, 0x8D, 0x94, 0x24, 0x80, 0x09, 0x00, 0x00, // lea rdx, [rsp+0x980]
+         0x48, 0x89, 0x42, 0x10, // mov [rdx+0x10], rax
+         0x0F, 0x10, 0x83, 0xF8, 0x00, 0x00, 0x00, // movups xmm0, [rbx+0xF8]
+         0x0F, 0x29, 0x02, // movaps [rdx], xmm0
+         0x48, 0x8D, 0x8B, 0xB0, 0x00, 0x00, 0x00, // lea rcx, [rbx+0xB0]
+         0xE8, 0x00, 0x00, 0x00, 0x00, // call: the request from method and URL
+         0x6A, 0x60, // push 0x60
+         0x59, // pop rcx
+         0x48, 0x89, 0xD7, // mov rdi, rdx
+         0x48, 0x89, 0xDE, // mov rsi, rbx
+         0xF3, 0xA4, // rep movsb: the headers
+         0x48, 0x8B, 0x43, 0x78, // mov rax, [rbx+0x78]
+         0x49, 0x63, 0x04, 0x87, // movsxd rax, [r15+rax*4]: the body's tag
+         0xC3, // ret
+         0x40, 0x8A, 0xAB, 0x62, 0x01, 0x00, 0x00, // mov bpl, [rbx+0x162]: past the ret
+      ];
+      let used = arg_use(Abi::SysV, 1, &code, 0x1000);
+      assert_eq!(used.extent, 0x163);
+      assert_eq!(used.calls, [[None, Some(0), None, None], [
+         None,
+         None,
+         Some(0xF8),
+         Some(0xB0)
+      ]]);
+      assert_eq!(used.copies, [StructCopy {
+         offset:      0,
+         len:         0x60,
+         after_calls: 2,
+      }]);
+      assert_eq!(used.dispatches, [0x78]);
+   }
+
+   #[test]
+   fn arg_use_follows_the_request_through_a_frame_slot() {
+      // Pieces of `ReqwestTransport::send` from the Windows build, which keeps
+      // the request on the stack and reloads it before each use.
+      let code = [
+         0x48, 0x89, 0x95, 0xB0, 0x0B, 0x00, 0x00, // mov [rbp+0xBB0], rdx
+         0xE8, 0x00, 0x00, 0x00, 0x00, // call
+         0x48, 0x8B, 0x95, 0xB0, 0x0B, 0x00, 0x00, // mov rdx, [rbp+0xBB0]
+         0x48, 0x8D, 0x5A, 0x60, // lea rbx, [rdx+0x60]
+         0x48, 0x8B, 0x03, // mov rax, [rbx]
+         0x48, 0x63, 0x04, 0x81, // movsxd rax, [rcx+rax*4]: the body's tag
+         0x48, 0x8B, 0x8D, 0xB0, 0x0B, 0x00, 0x00, // mov rcx, [rbp+0xBB0]
+         0x48, 0x8B, 0x81, 0xD0, 0x00, 0x00, 0x00, // mov rax, [rcx+0xD0]
+         0x4C, 0x8D, 0x85, 0xB0, 0x07, 0x00, 0x00, // lea r8, [rbp+0x7B0]
+         0x49, 0x89, 0x40, 0x10, // mov [r8+0x10], rax
+         0x0F, 0x10, 0x81, 0xC0, 0x00, 0x00, 0x00, // movups xmm0, [rcx+0xC0]
+         0x41, 0x0F, 0x29, 0x00, // movaps [r8], xmm0
+         0x48, 0x8B, 0x81, 0xA8, 0x00, 0x00, 0x00, // mov rax, [rcx+0xA8]
+         0x4C, 0x8D, 0x8D, 0xD0, 0x09, 0x00, 0x00, // lea r9, [rbp+0x9D0]
+         0x49, 0x89, 0x41, 0x10, // mov [r9+0x10], rax
+         0x0F, 0x10, 0x81, 0x98, 0x00, 0x00, 0x00, // movups xmm0, [rcx+0x98]
+         0x41, 0x0F, 0x29, 0x01, // movaps [r9], xmm0
+         0x48, 0x8D, 0x4D, 0xA0, // lea rcx, [rbp-0x60]
+         0xE8, 0x00, 0x00, 0x00, 0x00, // call: the request from method and URL
+         0x6A, 0x60, // push 0x60
+         0x59, // pop rcx
+         0x4C, 0x8D, 0x85, 0xD0, 0x09, 0x00, 0x00, // lea r8, [rbp+0x9D0]
+         0x4C, 0x89, 0xC7, // mov rdi, r8
+         0x48, 0x8B, 0xB5, 0xB0, 0x0B, 0x00, 0x00, // mov rsi, [rbp+0xBB0]
+         0xF3, 0xA4, // rep movsb: the headers
+      ];
+      let used = arg_use(Abi::Win64, 1, &code, 0x1000);
+      assert_eq!(used.calls, [[None, Some(0), None, None], [
+         None,
+         Some(0),
+         Some(0xC0),
+         Some(0x98)
+      ]]);
+      assert_eq!(used.copies, [StructCopy {
+         offset:      0,
+         len:         0x60,
+         after_calls: 2,
+      }]);
+      assert_eq!(used.dispatches, [0x60]);
    }
 
    #[test]

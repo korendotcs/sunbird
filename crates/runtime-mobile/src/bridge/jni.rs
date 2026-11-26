@@ -424,14 +424,24 @@ pub fn ready() -> bool {
 /// `env` is the current thread's `JNIEnv`, and `obj` is the `GuestHost` that
 /// `method` was invoked on.
 unsafe fn remember_guest_host(env: *mut JNIEnv, obj: jobject, method: jmethodID) {
-   if !GUEST_HOST.load(Ordering::Acquire).is_null() {
+   let current = GUEST_HOST.load(Ordering::Acquire);
+   // Backing out of the app destroys its activity but keeps the process, and
+   // reopening it builds a new GuestHost. Frames sent to the old one go
+   // nowhere, so the newest one wins.
+   // SAFETY: forwarded from the caller, and `current` is a live global ref.
+   if !current.is_null() && unsafe { jni!(env, IsSameObject, current, obj) } == JNI_TRUE {
       return;
    }
    INVOKE_METHOD.store(method, Ordering::Release);
    // SAFETY: forwarded from the caller. The global ref keeps the object alive
    // for apply_ops on other threads.
    let global = unsafe { jni!(env, NewGlobalRef, obj) };
+   // ponytail: the old global ref leaks (one per reopen), since another
+   // thread may still be calling through it.
    GUEST_HOST.store(global, Ordering::Release);
+   if !current.is_null() {
+      log::info!("bridge: GuestHost replaced after the activity was recreated");
+   }
 }
 
 unsafe extern "system" fn native_dispatch(

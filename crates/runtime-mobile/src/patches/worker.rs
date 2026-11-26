@@ -35,6 +35,7 @@ use crate::{
       Outcome,
       Patches,
       Place,
+      RESULTS_CAP,
       UiContext,
       aids::message_id,
       banners,
@@ -306,24 +307,108 @@ fn callback(call: impl FnOnce(&Engine)) -> Vec<Op> {
 }
 
 fn evaluate(contribution: ContributionId, place: Place) -> Vec<Op> {
-   let context = UiContext {
-      channel_id:      patches().channel.clone(),
-      message_id:      match &place {
-         Place::Message(id) => Some(id.clone()),
-         _ => None,
-      },
-      user_id:         match &place {
-         Place::User(id) => id.clone(),
-         _ => None,
-      },
-      current_user_id: None,
-      message:         None,
+   let target = patches()
+      .contributions
+      .iter()
+      .find(|known| known.id == contribution)
+      .map(|known| known.target);
+   if target.is_some_and(Target::decorates) {
+      return decorate(contribution, place);
+   }
+   // A message action's `visible` decides on the message, so it gets the
+   // same context as the press.
+   let context = if target == Some(Target::Action) {
+      press_context(&place)
+   } else {
+      UiContext {
+         channel_id:      patches().channel.clone(),
+         message_id:      match &place {
+            Place::Message(id) => Some(id.clone()),
+            _ => None,
+         },
+         user_id:         match &place {
+            Place::User(id) => id.clone(),
+            _ => None,
+         },
+         current_user_id: None,
+         message:         None,
+      }
    };
    let outcome = phoenix_runtime::engine()
       .and_then(|engine| ui_evaluate(&engine, contribution, &place, &context));
    outcome.map_or_else(Vec::new, |outcome| {
       patches().evaluated(contribution, place, outcome)
    })
+}
+
+/// Evaluates member or header decoration `contribution` for the user `place`
+/// is about, or draws nothing when there is none, like in a group DM.
+fn decorate(contribution: ContributionId, place: Place) -> Vec<Op> {
+   let known = patches().users.get(&place).cloned();
+   let user = known.unwrap_or_else(|| {
+      let user = match &place {
+         Place::User(user) => user.clone(),
+         Place::Message(message) => message_author(message),
+         Place::Channel(channel) => dm_recipient(channel),
+         Place::Screen => None,
+      };
+      let mut state = patches();
+      if state.users.len() >= RESULTS_CAP {
+         state.users.clear();
+      }
+      state.users.insert(place.clone(), user.clone());
+      user
+   });
+   let Some(user) = user else {
+      return patches().evaluated(contribution, place, Outcome::Text(None));
+   };
+   let context = UiContext {
+      user_id: Some(user),
+      ..UiContext::default()
+   };
+   let outcome = phoenix_runtime::engine()
+      .and_then(|engine| ui_evaluate(&engine, contribution, &place, &context));
+   outcome.map_or_else(Vec::new, |outcome| {
+      patches().evaluated(contribution, place, outcome)
+   })
+}
+
+/// A row of Phoenix's cache by its key, as JSON.
+fn cached<T: for<'de> Deserialize<'de>>(table: &str, key: String) -> Option<T> {
+   let database = store::database(&phoenix_runtime::state()?.files_dir()).ok()?;
+   // `LIKE` for a message, whose key starts with a channel we do not know.
+   let sql = format!("SELECT CAST(v AS TEXT) AS v FROM {table} WHERE k LIKE ? LIMIT 1");
+   let rows = store::query(&database, &sql, &[key])
+      .inspect_err(|err| log::warn!("patches: {table}: {err}"))
+      .ok()?;
+   serde_json::from_str(rows.first("v")?.text()?).ok()
+}
+
+/// The author of `message` in Phoenix's cache.
+fn message_author(message: &str) -> Option<String> {
+   #[derive(Deserialize)]
+   struct Author {
+      id: Snowflake,
+   }
+   #[derive(Deserialize)]
+   struct Message {
+      author: Author,
+   }
+   cached::<Message>("messages", format!("%:{message:0>20}"))
+      .map(|message| message.author.id.into())
+}
+
+/// The one recipient of DM `channel` in Phoenix's cache, kept under the empty
+/// guild.
+fn dm_recipient(channel: &str) -> Option<String> {
+   #[derive(Deserialize)]
+   struct Channel {
+      r#type:        u8,
+      recipient_ids: Vec<Snowflake>,
+   }
+   let channel = cached::<Channel>("channels", format!("{:0>20}:{channel:0>20}", 0))?;
+   let [user] = <[Snowflake; 1]>::try_from(channel.recipient_ids).ok()?;
+   (channel.r#type == 1).then(|| user.into())
 }
 
 fn view_event(

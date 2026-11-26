@@ -213,6 +213,8 @@ if ($Desktop) {
          $outDir = Join-Path $TargetDir $profileName
          $injectArgs = @()
          if ($NoRuntime) { $injectArgs += "--no-runtime" }
+         # The debug shell otherwise waits for DevTools to open; -Eval and friends need it.
+         $env:SUNBIRD_DEVTOOLS = "1"
          $injectArgs += (Join-Path $outDir "phoenix.dll")
          & (Join-Path $outDir "phoenix-inject.exe") @injectArgs
          exit $LASTEXITCODE

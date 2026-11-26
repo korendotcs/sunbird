@@ -28,13 +28,16 @@ use phoenix_hook::{image::Image, pattern::Pattern};
 use phoenix_sigs::{
    Found,
    file::{BinaryFile, Machine},
-   ios, macos, mobile,
+   ios, mobile,
    registry::GatewayRegistry,
 };
 #[cfg(target_arch = "x86_64")]
-use phoenix_sigs::{desktop, http::DesktopHttpTransport};
+use phoenix_sigs::{desktop, gateway_send::DesktopGatewaySend, http::DesktopHttpTransport};
+#[cfg(target_arch = "aarch64")]
+use phoenix_sigs::macos;
 
-const USAGE: &str = "usage: sigscan <library.so | Discord.exe | PhoenixFatClient | main.jsbundle> \
+const USAGE: &str = "usage: sigscan <library.so | Discord.exe | Discord | PhoenixFatClient | \
+                     main.jsbundle> \
                      [check | strings <text> | refs <addr> | dis <addr> [count]]";
 
 fn main() -> misstep::Result<()> {
@@ -117,8 +120,28 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                prologues
                   .frame
                   .at(image, http.send_fn)
-                  .then(|| at(http.send_fn))
+                  .then(|| format!("{} request {:x?}", at(http.send_fn), http.request))
                   .ok_or_else(|| "send prologue changed".to_owned())
+            }),
+         );
+         report(
+            "http responses",
+            http.as_ref().map_err(Clone::clone).and_then(|http| {
+               http
+                  .response
+                  .clone()
+                  .map(|layout| format!("{} {layout:x?}", at(http.poll_fn)))
+            }),
+         );
+         report(
+            "gateway send",
+            DesktopGatewaySend::locate(image).map(|gw| {
+               format!(
+                  "{} ({} slots, ok {:#x})",
+                  at(gw.start_send_fn),
+                  gw.start_send_slots.len(),
+                  gw.ok_tag
+               )
             }),
          );
          report(
@@ -207,6 +230,39 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                .map(|l| format!("{:x?}", l.style))
                .map_err(|_| "needs the layouts".to_owned()),
          );
+         report(
+            "member row",
+            desktop::member_row(image).map(|row| {
+               let closure = match row.name.closure_slot {
+                  Some(slot) => format!("frame +{slot:#x}"),
+                  None => format!("closure in {}", row.name.frame),
+               };
+               format!(
+                  "{} (name calls {:x?}, {closure}, env +{:#x})",
+                  at(row.func),
+                  row.name.sites,
+                  row.name.env
+               )
+            }),
+         );
+         report(
+            "dm row",
+            desktop::dm_row(image).map(|row| {
+               format!(
+                  "{} (name call {}, recipient [{frame}+{:#x}] if [{frame}+{:#x}])",
+                  at(row.func),
+                  at(row.site),
+                  row.user,
+                  row.some,
+                  frame = row.frame
+               )
+            }),
+         );
+         report(
+            "svg builders",
+            desktop::svg_builders(image).map(|svg| format!("{svg:x?}")),
+         );
+         report("asset loader", desktop::asset_load(image).map(at));
          let row = desktop::message_row(image);
          report(
             "message row",
@@ -297,6 +353,7 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
             }),
          );
          report("media fetch", desktop::media_fetch(image).map(at));
+         report("composer gift", desktop::composer_gift(image).map(at));
          report(
             "emoji check",
             desktop::emoji_check(image).and_then(|check| {
@@ -307,21 +364,54 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                   .ok_or_else(|| "prologue changed".to_owned())
             }),
          );
+         let json = desktop::message_json(image);
          report(
             "message json",
-            desktop::message_json(image).map(|found| {
-               format!(
-                  "to_value {}, drop {}",
-                  at(found.to_value),
-                  at(found.drop_value)
-               )
-            }),
+            json
+               .as_ref()
+               .map(|found| {
+                  format!(
+                     "to_value {}, drop {}",
+                     at(found.to_value),
+                     at(found.drop_value)
+                  )
+               })
+               .map_err(Clone::clone),
+         );
+         report(
+            "message header",
+            row.as_ref()
+               .map_err(|_| "needs the message row".to_owned())
+               .and_then(|row| desktop::message_body(image, row.func))
+               .and_then(|body| desktop::message_header(image, body.func))
+               .map(|header| {
+                  let sites = header
+                     .sites
+                     .iter()
+                     .map(|site| format!("{} [{}+{:#x}]", at(site.site), header.frame, site.slot))
+                     .collect::<Vec<_>>()
+                     .join(", ");
+                  format!(
+                     "name calls {sites}; child_node {}, svg_new {}, push_svg {}, leaf {:#x} \
+                      (color +{:#x})",
+                     at(header.child_node),
+                     at(header.svg.new),
+                     at(header.svg.push),
+                     header.svg.size,
+                     header.svg.color
+                  )
+               }),
          );
       },
+      #[cfg(target_arch = "aarch64")]
       Machine::Aarch64 if macho => {
-         #[cfg(target_arch = "aarch64")]
-         if image.file_name() == "Discord" {
-            report("access gate", macos::access_gate(image).map(at));
+         if matches!(image.file_name(), macos::EXECUTABLE | "Discord.bin") {
+            let read = macos::access_gate(image);
+            report("access gate", read.clone().map(at));
+            report(
+               "access enforced",
+               read.and_then(|read| macos::access_enforced(image, read).map(at)),
+            );
             report(
                "settings label",
                macos::settings_label_parts(image)
@@ -629,7 +719,18 @@ impl Tools<'_> {
             println!("   -- end of function --");
             break;
          }
-         println!("   {}  {}", self.at(line.addr), line.text);
+         // Calls and jumps through a pointer slot, as ELF builds make them,
+         // print where the slot points.
+         let bytes = &code[line.addr - addr..];
+         let through = match bytes {
+            [0xFF, 0x15, ..] => x86::call_target(self.image, bytes, line.addr).map(|(_, to)| to),
+            [0xFF, 0x25, ..] => x86::jump_target(self.image, bytes, line.addr),
+            _ => None,
+         };
+         match through {
+            Some(to) => println!("   {}  {}   -> {to:#x}", self.at(line.addr), line.text),
+            None => println!("   {}  {}", self.at(line.addr), line.text),
+         }
       }
       #[cfg(not(target_arch = "x86_64"))]
       let _ = (code, count, end);

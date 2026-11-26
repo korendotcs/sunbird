@@ -1,5 +1,5 @@
 // @description Rewrites your outgoing messages by find and replace rules
-// @version 0.1.0
+// @version 0.1.1
 // @author amaanq
 
 const KEY = "rules";
@@ -58,6 +58,7 @@ phoenix.settings.define({
       type: "text",
       title: "Rules",
       description: "One per line, find=>replace. A find of /pattern/flags is a regex.",
+      multiline: true,
       default: phoenix.storage.get<string>(KEY) ?? "",
       onChange(value) {
          phoenix.storage.set(KEY, value);

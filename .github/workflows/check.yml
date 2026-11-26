@@ -5,8 +5,8 @@ name: check
 # Desktop Phoenix sits behind Discord's tester access, so it is checked only when
 # the DISCORD_EXE_URL repository variable points at a copy of its Discord.exe.
 on:
-  push:
-    paths: ['crates/hook/**', 'crates/sigs/**', 'crates/sigscan/**', 'Cargo.*', 'flake.*', '.github/workflows/check.yml']
+  pull_request:
+    paths: ['crates/hook/**', 'crates/sigs/**', 'crates/sigscan/**', 'crates/loader/**', 'Cargo.*', 'flake.*', '.github/workflows/check.yml']
   schedule:
     - cron: '17 6 * * *'
   workflow_dispatch:
@@ -18,8 +18,10 @@ jobs:
   locators:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
       - run: nix develop --command cargo test --release -p phoenix-hook -p phoenix-sigs
       - run: nix develop --command cargo build --release -p sigscan
       - name: sigscan check
@@ -45,3 +47,13 @@ jobs:
             echo "::notice::DISCORD_EXE_URL is unset, desktop skipped"
           fi
           exit $missed
+  # The macOS loader opens Desktop Phoenix's access gate by rewriting signed
+  # code, which only a Mac can build and test.
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo test --locked --release -p phoenix-hook -p phoenix-sigs -p phoenix-loader
+      - run: cargo build --locked --release -p phoenix-loader

@@ -38,12 +38,12 @@ Read this file before changing code. Every fact here cost someone hours to learn
 
 | Path | What |
 |---|---|
-| `crates/loader` | `libphoenix.so`, injected into the APK as `libplm.so`. Its constructor starts the runtime. |
+| `crates/loader` | `libphoenix.so`, injected into the APK as `libplm.so`. Its constructor starts the runtime. On macOS it only opens Desktop Phoenix's access gate, since the Desktop hooks decode x86-64 and the Mac app is arm64. |
 | `crates/runtime` | QuickJS plugin runtime and the `phoenix` API every platform shares. `phoenix.d.ts` is the plugin API reference. `platform.rs` is the `Platform` trait the platform crates implement. |
 | `crates/runtime/src/gateway.rs` | Gateway event hooks by swapping handler pointers in Phoenix's event registry. |
 | `crates/runtime/src/discord.rs` | `phoenix.discord`, Discord's API with Phoenix's own session. The platforms carry the requests. |
 | `crates/runtime/src/update.rs` | Update checks against the site and one-tap plugin updates. |
-| `crates/runtime/src/remote.rs` | The debug shell on `127.0.0.1:4242`, off by default on Android, switched on in Settings, Phoenix Unlocker, Debug. The platforms add their own endpoints. |
+| `crates/runtime/src/remote.rs` | The debug shell on `127.0.0.1:4242`, off by default on Android, switched on in Settings, Phoenix Unlocker, Debug. On desktop it starts when DevTools first opens, or at launch with `SUNBIRD_DEVTOOLS` set, which `dev.ps1 -Desktop` does. The platforms add their own endpoints. |
 | `crates/runtime-mobile` | phoenix on Phoenix's Android and iOS clients, started by the loader there. iOS has no installer or staff hook, and uses Foundation HTTP and a bundled SQLite. |
 | `crates/runtime-mobile/src/bridge/` | The sinks every guest/host frame passes, returning `Action::{Pass, Drop, Replace}`. `jni.rs` patches the JNI table on `GuestHost.invoke`/`applyOps` and rebinds `nativeDispatch`. `ios.rs` swaps the dispatch slot in the guest's vtable and the call slot in the host callbacks' vtable. |
 | `crates/runtime-mobile/src/settings/` | The Phoenix Unlock settings pages, built from UI ops. |
@@ -57,7 +57,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/ui-desktop` | Desktop UI host primitives (clipboard, URLs, notifications, GPUI surface hooks). |
 | `crates/wire` | Tagged values and bridge frames (`HostCall`, `DispatchEvent`). |
 | `crates/hook` | Image scanner, `swap_words`, ShadowHook through `sunhook-sys` on Android ARM. |
-| `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and every other locator the runtime patches from (`desktop.rs`, `mobile.rs`). `sigscan` dumps a library's registry, runs `check` (every locator for that platform, exit 1 on a miss) and looks up strings, references and disassembly in `Discord.exe`. |
+| `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and every other locator the runtime patches from (`desktop.rs`, `mobile.rs`, `macos.rs`). `sigscan` dumps a library's registry, runs `check` (every locator for that platform, exit 1 on a miss) and looks up strings, references and disassembly in `Discord.exe`. |
 | `crates/patcher` | Patches the split APKs and signs them, as a library with a CLI. One APK merged from the splits or each split signed on its own. |
 | `crates/patcher-web` | `crates/patcher` as wasm for the site. |
 | `crates/stand-in*` | A fake gateway library and a demo, to test hooks without Discord. |

@@ -58,6 +58,7 @@ use std::{
 
 use phoenix_ui_mobile::{
    Node,
+   Op,
    Prop,
    Props,
    ViewKind,
@@ -139,6 +140,8 @@ pub enum Place {
    Screen,
    Message(String),
    User(Option<String>),
+   /// A DM, whose one recipient member decorations are about.
+   Channel(String),
 }
 
 #[derive(Clone)]
@@ -148,6 +151,8 @@ pub struct Rendered {
    /// Under a message's content: the color of its author and text (32-bit
    /// ARGB).
    pub tint:  Option<i64>,
+   /// Images drawn after names by member and header decorations.
+   pub icons: Vec<String>,
 }
 
 /// A plugin's answer for one place: the text it renders, or whether its row
@@ -396,6 +401,13 @@ struct Patches {
    suggestions:            commands::Suggestions,
    /// Sends plugins already saw, let through once when Rust gets them back.
    resent:                 Vec<Vec<u8>>,
+   /// The user a member or header decoration's place is about, once the
+   /// worker read it from Phoenix's cache.
+   users:                  HashMap<Place, Option<String>>,
+   /// Member slots that take the room a stretched name had, by parent.
+   grown:                  HashSet<i32>,
+   /// Ops for Phoenix's own nodes, sent after the batch that creates them.
+   late:                   Vec<Op>,
    /// Message text color plugins asked for, by message id.
    tints:                  HashMap<String, i64>,
    /// Phoenix's author and content text nodes: their message and props as
@@ -545,6 +557,53 @@ pub fn update(id: ContributionId, place: Option<Place>) {
       .retain(|(contribution, _), _| *contribution != id);
    drop(state);
    queue(Job::Refresh(target));
+}
+
+/// Draws member or header decoration `id` again for `user`: anew where it
+/// is on screen, and when it next shows elsewhere.
+pub fn update_user(id: ContributionId, user: &str) {
+   let mut state = patches();
+   let Some(target) = state
+      .contributions
+      .iter()
+      .find(|contribution| contribution.id == id)
+      .map(|contribution| contribution.target)
+   else {
+      return;
+   };
+   let Patches {
+      slots,
+      users,
+      results,
+      pending,
+      ..
+   } = &mut *state;
+   let about = |place: &Place| {
+      match place {
+         Place::User(known) => known.as_deref() == Some(user),
+         _ => {
+            users
+               .get(place)
+               .is_some_and(|known| known.as_deref() == Some(user))
+         },
+      }
+   };
+   let shown = slots
+      .iter()
+      .filter(|slot| slot.kind == SlotKind::Target(target) && about(&slot.place))
+      .map(|slot| slot.place.clone())
+      .collect::<HashSet<_>>();
+   results.retain(|(contribution, place), _| {
+      *contribution != id || shown.contains(place) || !about(place)
+   });
+   let asked = shown
+      .into_iter()
+      .filter(|place| pending.insert((id, place.clone())))
+      .collect::<Vec<_>>();
+   drop(state);
+   for place in asked {
+      queue(Job::Evaluate(id, place));
+   }
 }
 
 /// What [`update_button`] does to a button's tint.

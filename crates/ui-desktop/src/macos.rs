@@ -9,14 +9,6 @@ use std::{
 
 use crate::{DesktopHost, Error, spawn_reaped};
 
-const APP_BROWSERS: [&str; 5] = [
-   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-   "/Applications/Chromium.app/Contents/MacOS/Chromium",
-   "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-   "/Applications/Arc.app/Contents/MacOS/Arc",
-];
-
 fn pipe_to(mut command: Command, text: &str) -> bool {
    let Ok(mut child) = command
       .stdin(Stdio::piped())
@@ -47,14 +39,6 @@ impl DesktopHost for Host {
 
    fn open(target: &str) -> Result<(), Error> {
       spawn_reaped(Command::new("open").arg(target))
-   }
-
-   fn app_browser() -> Option<Command> {
-      APP_BROWSERS
-         .into_iter()
-         .map(PathBuf::from)
-         .find(|path| path.is_file())
-         .map(Command::new)
    }
 
    fn pick_js_path() -> Option<PathBuf> {

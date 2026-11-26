@@ -1,5 +1,5 @@
 // @description Double-tap a message to reply, or your own to edit
-// @version 1.0.0
+// @version 1.1.0
 // @author mantikafasi
 
 const settings = phoenix.settings.define({
@@ -42,6 +42,10 @@ phoenix.ui.onEvent(
           ? "message.actions.reply"
           : null;
     if (!action) return false;
+    if (ev.press) {
+      ev.press(action);
+      return true;
+    }
 
     pendingAction = action;
     pendingUntil = Date.now() + 2000;

@@ -182,6 +182,8 @@ pub struct Setting {
    pub title:       String,
    pub description: Option<String>,
    pub control:     Control,
+   /// A text setting edited over several lines.
+   pub multiline:   bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -528,7 +530,6 @@ pub fn start_hooked(
    let first_run = !state.choices_path().exists();
    platform.before_plugins(&state.home);
    let plugins = js::load_plugins(state, bundled)?;
-   remote::ensure_started();
    platform.started(first_run, &plugins);
    Ok(Started {
       target: state.image.path.clone(),
