@@ -638,8 +638,8 @@ unsafe extern "C" fn button_callback(
                };
                match phoenix_runtime::install_file(&file_name, bytes) {
                   Ok(installed) => {
-                     log::info!("sunbird settings: installed {installed} from {file_name}");
-                     phoenix_ui_desktop::toast(&format!("Installed {installed}"));
+                     log::info!("sunbird settings: {installed} from {file_name}");
+                     phoenix_ui_desktop::toast(&installed.to_string());
                      #[cfg(target_arch = "x86_64")]
                      crate::modal::force_redraw();
                   },
@@ -660,8 +660,8 @@ unsafe extern "C" fn button_callback(
             std::thread::spawn(move || {
                match update::install_listed(&name) {
                   Ok(installed) => {
-                     log::info!("sunbird settings: installed {installed}");
-                     phoenix_ui_desktop::toast(&format!("Installed {installed}"));
+                     log::info!("sunbird settings: {installed}");
+                     phoenix_ui_desktop::toast(&installed.to_string());
                   },
                   Err(err) => {
                      log::warn!("sunbird settings: install {name}: {err}");
