@@ -41,6 +41,8 @@ mod message;
 #[cfg(target_arch = "x86_64")]
 mod modal;
 mod os;
+#[cfg(windows)]
+mod restart;
 mod settings;
 #[cfg(target_arch = "x86_64")]
 mod staff;
@@ -110,6 +112,8 @@ pub fn prepare() -> Result<(), Error> {
    phoenix_runtime::set_platform(&Desktop);
    let image = phoenix_runtime::target()?;
    open_access_gate(&image);
+   #[cfg(windows)]
+   restart::install(&image);
    #[cfg(target_arch = "x86_64")]
    staff::prepare(&image);
    settings::install(&image);
@@ -150,11 +154,13 @@ pub fn prepare() -> Result<(), Error> {
    Ok(())
 }
 
-/// Opens the access gate and hooks nothing else, so Discord runs as it would
-/// without Sunbird. For telling Discord's own behaviour from ours.
+/// Opens the access gate for testing Discord without the plugin runtime.
 pub fn open_gate_only() -> Result<(), Error> {
    phoenix_runtime::set_platform(&Desktop);
-   open_access_gate(&phoenix_runtime::target()?);
+   let image = phoenix_runtime::target()?;
+   open_access_gate(&image);
+   #[cfg(windows)]
+   restart::install(&image);
    Ok(())
 }
 
