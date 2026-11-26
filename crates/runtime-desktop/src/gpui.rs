@@ -984,7 +984,7 @@ impl Builder {
       );
       #[cfg(target_arch = "aarch64")]
       let (rc_ptr, vtbl) = button_rc(action);
-      new_button(self.sym, id, label, variant, size, rc_ptr, vtbl)
+      new_button(self.sym, id, label, variant, size, vtbl, rc_ptr)
    }
 
    fn push_button(

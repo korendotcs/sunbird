@@ -555,7 +555,7 @@ fn div_interactivity_size(image: &Image<'_>, div_new: usize) -> Found<usize> {
 }
 
 /// Decodes `(on_click, variant, scale)` from `Button::new`'s initialization stores
-/// into `x8` (`sret`).
+/// into `x8` (`sret`). `on_click` is picked by [`button_on_click_field`].
 fn decode_button_layout(image: &Image<'_>, button_new: usize) -> Found<(usize, usize, usize)> {
    let (s, e) = image
       .function_bounds(button_new)
@@ -563,17 +563,14 @@ fn decode_button_layout(image: &Image<'_>, button_new: usize) -> Found<(usize, u
    let bytes = image
       .read(s, (e - s).min(0x100))
       .ok_or("Button::new unmapped")?;
-   let mut on_click = None;
+   let mut cleared = Vec::new();
    let mut variant = None;
    let mut scale = None;
    for chunk in bytes.as_chunks::<4>().0 {
       let insn = u32::from_le_bytes(*chunk);
-      // `str xzr, [x8, #imm]` (0xF900_011F) -> first zeroed 8-byte Option<Rc> in 0x240..0x280
-      if on_click.is_none() && insn & 0xFFC0_03FF == 0xF900_011F {
-         let off = (((insn >> 10) & 0xFFF) as usize) * 8;
-         if (0x240..0x280).contains(&off) {
-            on_click = Some(off);
-         }
+      // `str xzr, [x8, #imm]` (0xF900_011F) clears an 8-byte `Option` niche.
+      if insn & 0xFFC0_03FF == 0xF900_011F {
+         cleared.push((((insn >> 10) & 0xFFF) as usize) * 8);
       }
       // `strb wzr, [x8, #imm]` (0x3900_011F) -> variant = 0 (Primary), first in 0x300..0x318
       if variant.is_none() && insn & 0xFFC0_03FF == 0x3900_011F {
@@ -591,10 +588,96 @@ fn decode_button_layout(image: &Image<'_>, button_new: usize) -> Found<(usize, u
       }
    }
    Ok((
-      on_click.ok_or("Button::on_click offset not found")?,
+      button_on_click_field(image, &cleared)?,
       variant.ok_or("Button::variant offset not found")?,
       scale.ok_or("Button::size offset not found")?,
    ))
+}
+
+/// The first of `cleared` that every drop of a struct with all of them,
+/// loaded through one register, releases as an `Rc` in place. `Option<Rc<dyn
+/// Fn>>` drops as `ldr x8, [xN, #off]; cbz x8; ldr x9, [x8]; subs x9, x9, #1;
+/// str x9, [x8]` followed by `add x0, xN, #off` for the slow path.
+///
+/// On macOS Phoenix 0.1.0 (2233), `Button::new` clears an `Option` struct at
+/// `0x268` and an `Option<Box<dyn Fn>>` at `0x288` ahead of `on_click` at
+/// `0x298`, and a closure written into either crashes Discord when the button
+/// drops. Three other drops share Button's field offsets and hold an `Rc` at
+/// `0x268`, so a field counts only when all of them release it.
+fn button_on_click_field(image: &Image<'_>, cleared: &[usize]) -> Found<usize> {
+   const LDR_X: u32 = 0xF940_0000;
+   const CBZ_X: u32 = 0xB400_0000;
+   const SUBS_X_1: u32 = 0xF100_0400;
+   const STR_X: u32 = 0xF900_0000;
+   const ADD_X: u32 = 0x9100_0000;
+
+   let mut rc_fields: HashMap<(usize, u32), Vec<usize>> = HashMap::new();
+   for segment in image.segments.iter().filter(|segment| segment.executable) {
+      let words: Vec<u32> = segment
+         .bytes
+         .as_chunks::<4>()
+         .0
+         .iter()
+         .map(|chunk| u32::from_le_bytes(*chunk))
+         .collect();
+      for (at, window) in words.windows(8).enumerate() {
+         let load = window[0];
+         if load & 0xFFC0_0000 != LDR_X {
+            continue;
+         }
+         let off = ((load >> 10) & 0xFFF) as usize * 8;
+         if !cleared.contains(&off) {
+            continue;
+         }
+         let (rc, base) = (load & 31, (load >> 5) & 31);
+         let strong = window[2] & 31;
+         let decrements = window[1] & 0xFF00_001F == CBZ_X | rc
+            && window[2] & 0xFFFF_FFE0 == LDR_X | rc << 5
+            && window[3] == SUBS_X_1 | strong << 5 | strong
+            && window[4] == STR_X | rc << 5 | strong;
+         // `add x0, xN, #off` only encodes a 12-bit immediate.
+         let Some(imm) = u32::try_from(off).ok().filter(|imm| *imm <= 0xFFF) else {
+            continue;
+         };
+         if decrements
+            && window[5..].contains(&(ADD_X | imm << 10 | base << 5))
+            && let Some(func) = image.function_containing(segment.addr + at * 4)
+         {
+            rc_fields.entry((func, base)).or_default().push(off);
+         }
+      }
+   }
+   let loads_every_cleared = |func: usize, base: u32| {
+      let Some(code) = image
+         .function_bounds(func)
+         .and_then(|(start, end)| image.read(start, end - start))
+      else {
+         return false;
+      };
+      let loaded: Vec<usize> = code
+         .as_chunks::<4>()
+         .0
+         .iter()
+         .map(|chunk| u32::from_le_bytes(*chunk))
+         .filter(|insn| insn & 0xFFC0_0000 == LDR_X && (insn >> 5) & 31 == base)
+         .map(|insn| ((insn >> 10) & 0xFFF) as usize * 8)
+         .collect();
+      cleared.iter().all(|off| loaded.contains(off))
+   };
+   let drops: Vec<&Vec<usize>> = rc_fields
+      .iter()
+      .filter(|((func, base), _)| loads_every_cleared(*func, *base))
+      .map(|(_, offsets)| offsets)
+      .collect();
+   if drops.is_empty() {
+      return Err("Button::on_click: no drop of every cleared field releases one as Rc".to_owned());
+   }
+   cleared
+      .iter()
+      .copied()
+      .filter(|off| drops.iter().all(|offsets| offsets.contains(off)))
+      .min()
+      .ok_or_else(|| "Button::on_click: no cleared field is an Rc in every drop".to_owned())
 }
 
 fn debug_offsets(image: &Image<'_>, func: usize, depth: usize) -> HashMap<String, usize> {
