@@ -61,3 +61,28 @@ const rewrite = (message: { content?: string }) => {
 phoenix.hook(gateway.messageCreate, { before: rewrite });
 phoenix.hook(gateway.messageUpdate, { before: rewrite });
 phoenix.messages.onSend((text) => (text.includes("?") ? cleanLinks(text) : undefined));
+
+if (typeof phoenix.ui.addWebviewScript === "function") {
+  phoenix.ui.addWebviewScript(
+    "links",
+    `(() => {
+      const re = /^(utm_|ref_src$|ref_url$|fbclid$|gclid$|dclid$|gbraid$|wbraid$|msclkid$|yclid$|twclid$|ttclid$|igshid$|igsh$|mc_eid$|mc_cid$|si$|_hsenc$|_hsmi$|mkt_tok$)/i;
+      const stripUrl = (raw) => {
+        try {
+          const u = new URL(raw, location.href);
+          let changed = false;
+          for (const k of [...u.searchParams.keys()]) {
+            if (re.test(k)) { u.searchParams.delete(k); changed = true; }
+          }
+          return changed ? u.toString() : raw;
+        } catch { return raw; }
+      };
+      document.addEventListener("click", (ev) => {
+        const a = ev.target && ev.target.closest ? ev.target.closest("a[href]") : null;
+        if (!a) return;
+        const cleaned = stripUrl(a.href);
+        if (cleaned !== a.href) a.href = cleaned;
+      }, true);
+    })();`
+  );
+}
