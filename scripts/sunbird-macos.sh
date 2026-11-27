@@ -6,12 +6,21 @@
 #
 #   sh scripts/sunbird-macos.sh [/path/to/Discord Phoenix.app]
 #   sh scripts/sunbird-macos.sh --install [/path/to/Discord Phoenix.app]
+#   sh scripts/sunbird-macos.sh --install --sandbox [/path/to/Discord Phoenix.app]
 #   sh scripts/sunbird-macos.sh --no-runtime
 #   sh scripts/sunbird-macos.sh --uninstall
 #
 # --install wraps Discord Phoenix.app in place with a native arm64 Mach-O
 # launcher so launching from Finder, Spotlight, or the Dock always loads
 # Sunbird and preserves login keychain access across restarts.
+#
+# --sandbox (with --install) runs Discord under the App Sandbox: network,
+# microphone, camera and files picked in an open or save panel, nothing else
+# of the home folder. Discord and Sunbird keep their data in
+# ~/Library/Containers/com.discord.DesktopGpui, so the first launch is signed
+# out. Discord's binary links libphoenix.dylib itself instead of starting
+# through the launcher, and the CEF helpers keep Discord's signatures and
+# inherit the sandbox.
 #
 # SUNBIRD_DYLIB points at a locally built libphoenix.dylib.
 # SUNBIRD_SITE points at a custom download server (default: https://assets.sunbird.tools).
@@ -29,13 +38,20 @@ fi
 
 install_app=
 no_runtime=
+sandbox=
 while [ $# -gt 0 ]; do
    case "$1" in
       --install) install_app=1; shift ;;
       --no-runtime|--gate-only) no_runtime=1; shift ;;
+      --sandbox) sandbox=1; shift ;;
       *) break ;;
    esac
 done
+
+if [ -n "$sandbox" ] && [ -z "$install_app" ]; then
+   echo "--sandbox only works with --install." >&2
+   exit 1
+fi
 
 discord=${1:-}
 if [ -z "$discord" ]; then
@@ -111,11 +127,108 @@ if [ -n "$install_app" ]; then
    mkdir -p "$app/Contents/Frameworks"
    cp "$dylib" "$app/Contents/Frameworks/libphoenix.dylib"
 
-   if [ ! -x "$app/Contents/MacOS/Discord.bin" ]; then
-      mv "$app/Contents/MacOS/Discord" "$app/Contents/MacOS/Discord.bin"
-   fi
+   if [ -n "$sandbox" ]; then
+      # The App Sandbox only lets an app's main executable register with
+      # LaunchServices, so a launcher that execs Discord cannot work here.
+      # Discord's own binary links libphoenix.dylib instead.
+      if [ -x "$app/Contents/MacOS/Discord.bin" ]; then
+         mv -f "$app/Contents/MacOS/Discord.bin" "$app/Contents/MacOS/Discord"
+      fi
+      cat >"$stage/link.c" <<'EOF'
+#include <mach-o/loader.h>
+#include <stdio.h>
+#include <string.h>
 
-   cat >"$stage/launcher.c" <<'EOF'
+/* Adds LC_LOAD_DYLIB argv[2] to the thin arm64 Mach-O argv[1], in the free
+   space after its load commands, keeping LC_CODE_SIGNATURE last. */
+int main(int argc, char **argv) {
+   static unsigned char buf[1 << 20];
+   if (argc != 3) return 2;
+   FILE *f = fopen(argv[1], "r+b");
+   if (!f) { perror(argv[1]); return 1; }
+   size_t n = fread(buf, 1, sizeof(buf), f);
+   struct mach_header_64 *h = (void *)buf;
+   if (n < sizeof(*h) || h->magic != MH_MAGIC_64 || sizeof(*h) + h->sizeofcmds > n) {
+      fprintf(stderr, "%s: not a thin 64-bit Mach-O\n", argv[1]);
+      return 1;
+   }
+   size_t end = sizeof(*h) + h->sizeofcmds, first = n, last = 0;
+   unsigned char *p = buf + sizeof(*h);
+   for (uint32_t i = 0; i < h->ncmds; i++) {
+      struct load_command *lc = (void *)p;
+      if (lc->cmd == LC_SEGMENT_64) {
+         struct segment_command_64 *seg = (void *)p;
+         struct section_64 *sect = (void *)(seg + 1);
+         for (uint32_t j = 0; j < seg->nsects; j++)
+            if (sect[j].offset && sect[j].offset < first) first = sect[j].offset;
+      } else if (lc->cmd == LC_LOAD_DYLIB) {
+         struct dylib_command *d = (void *)p;
+         if (!strcmp((char *)p + d->dylib.name.offset, argv[2])) return 0;
+      }
+      last = (size_t)(p - buf);
+      p += lc->cmdsize;
+   }
+   size_t len = strlen(argv[2]) + 1;
+   uint32_t size = (uint32_t)((sizeof(struct dylib_command) + len + 7) & ~(size_t)7);
+   if (end + size > first) {
+      fprintf(stderr, "%s: no room for another load command\n", argv[1]);
+      return 1;
+   }
+   for (size_t i = end; i < end + size; i++)
+      if (buf[i]) {
+         fprintf(stderr, "%s: the space after the load commands is not empty\n", argv[1]);
+         return 1;
+      }
+   size_t at = end;
+   struct load_command *tail = (void *)(buf + last);
+   if (h->ncmds && tail->cmd == LC_CODE_SIGNATURE) {
+      memmove(buf + last + size, buf + last, tail->cmdsize);
+      at = last;
+   }
+   struct dylib_command *d = (void *)(buf + at);
+   memset(d, 0, size);
+   d->cmd = LC_LOAD_DYLIB;
+   d->cmdsize = size;
+   d->dylib.name.offset = sizeof(*d);
+   d->dylib.timestamp = 2;
+   d->dylib.current_version = 0x10000;
+   d->dylib.compatibility_version = 0x10000;
+   memcpy((char *)d + sizeof(*d), argv[2], len);
+   h->ncmds++;
+   h->sizeofcmds += size;
+   rewind(f);
+   if (fwrite(buf, 1, end + size, f) != end + size || fclose(f)) {
+      perror(argv[1]);
+      return 1;
+   }
+   return 0;
+}
+EOF
+      clang -O2 -o "$stage/link" "$stage/link.c"
+      "$stage/link" "$app/Contents/MacOS/Discord" "@executable_path/../Frameworks/libphoenix.dylib"
+      cat >"$stage/sandbox.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+   <key>com.apple.security.app-sandbox</key><true/>
+   <key>com.apple.security.network.client</key><true/>
+   <key>com.apple.security.network.server</key><true/>
+   <key>com.apple.security.device.audio-input</key><true/>
+   <key>com.apple.security.device.camera</key><true/>
+   <key>com.apple.security.files.user-selected.read-write</key><true/>
+</dict>
+</plist>
+EOF
+      codesign --force --sign - "$app/Contents/Frameworks/libphoenix.dylib"
+      codesign --force --sign - --identifier com.discord.DesktopGpui \
+         --entitlements "$stage/sandbox.plist" "$app"
+   else
+      if [ ! -x "$app/Contents/MacOS/Discord.bin" ]; then
+         mv "$app/Contents/MacOS/Discord" "$app/Contents/MacOS/Discord.bin"
+      fi
+
+      cat >"$stage/launcher.c" <<'EOF'
 #include <libgen.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
@@ -152,16 +265,21 @@ int main(int argc, char **argv) {
    return 1;
 }
 EOF
-   clang -arch arm64 -O2 -o "$app/Contents/MacOS/Discord" "$stage/launcher.c"
-   chmod +x "$app/Contents/MacOS/Discord"
+      clang -arch arm64 -O2 -o "$app/Contents/MacOS/Discord" "$stage/launcher.c"
+      chmod +x "$app/Contents/MacOS/Discord"
 
-   codesign --force --sign - "$app/Contents/Frameworks/libphoenix.dylib"
-   codesign --force --sign - --identifier com.discord.DesktopGpui "$app/Contents/MacOS/Discord.bin"
-   codesign --force --sign - --identifier com.discord.DesktopGpui "$app"
+      codesign --force --sign - "$app/Contents/Frameworks/libphoenix.dylib"
+      codesign --force --sign - --identifier com.discord.DesktopGpui "$app/Contents/MacOS/Discord.bin"
+      codesign --force --sign - --identifier com.discord.DesktopGpui "$app"
+   fi
 
    rm -rf "$discord" "$copy"
    mv "$app" "$discord"
-   echo "Installed Sunbird into $discord."
+   if [ -n "$sandbox" ]; then
+      echo "Installed Sunbird into $discord, sandboxed."
+   else
+      echo "Installed Sunbird into $discord."
+   fi
    open -a "$discord"
    exit 0
 fi
