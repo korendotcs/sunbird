@@ -1515,6 +1515,127 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<
    )?;
    let notify_owner = plugin.to_owned();
    ui.set(
+      "openUrl",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>, url: String| {
+         phoenix_ui_desktop::open_url(&url)
+            .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+      })?,
+   )?;
+   ui.set(
+      "speak",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>, text: String| {
+         phoenix_ui_desktop::speak(&text)
+            .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+      })?,
+   )?;
+   ui.set(
+      "setAlwaysOnTop",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>, enabled: bool| {
+         phoenix_ui_desktop::set_always_on_top(enabled)
+            .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+      })?,
+   )?;
+   ui.set(
+      "setWindowTitle",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>, title: String| {
+         phoenix_ui_desktop::set_window_title(&title)
+            .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+      })?,
+   )?;
+   ui.set(
+      "quickLook",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>, url: String| {
+         phoenix_ui_desktop::quick_look(&url)
+            .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+      })?,
+   )?;
+   ui.set(
+      "mediaControl",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>, player: String, cmd: String| {
+         phoenix_ui_desktop::media_control(&player, &cmd)
+            .map_err(|err| Exception::throw_message(&ctx, &err.to_string()))
+      })?,
+   )?;
+   ui.set(
+      "setYoutubeAdblock",
+      Function::new(ctx.clone(), |enabled: bool| {
+         phoenix_ui_desktop::set_youtube_adblock(enabled);
+      })?,
+   )?;
+   let wv_script_owner = plugin.to_owned();
+   ui.set(
+      "addWebviewScript",
+      Function::new(
+         ctx.clone(),
+         move |ctx: Ctx<'js>, id: String, js: String| -> rquickjs::Result<Function<'js>> {
+            let key = format!("{wv_script_owner}:{id}");
+            phoenix_ui_desktop::register_webview_script(&key, &js);
+            Function::new(ctx, move || {
+               phoenix_ui_desktop::unregister_webview_script(&key);
+            })
+         },
+      )?,
+   )?;
+   let wv_css_owner = plugin.to_owned();
+   ui.set(
+      "addWebviewCss",
+      Function::new(
+         ctx.clone(),
+         move |ctx: Ctx<'js>, id: String, css: String| -> rquickjs::Result<Function<'js>> {
+            let key = format!("{wv_css_owner}:css:{id}");
+            let css_json = serde_json::to_string(&css).unwrap_or_else(|_| "\"\"".to_owned());
+            let id_json = serde_json::to_string(&key).unwrap_or_else(|_| "\"sb\"".to_owned());
+            let js = format!(
+               "(() => {{ const id = {id_json}; const css = {css_json}; const apply = () => {{ if (!document.head) return; let el = document.getElementById(id); if (!el) {{ el = document.createElement('style'); el.id = id; document.head.appendChild(el); }} el.textContent = css; }}; if (document.head) apply(); else document.addEventListener('DOMContentLoaded', apply, {{ once: true }}); }})();"
+            );
+            phoenix_ui_desktop::register_webview_script(&key, &js);
+            Function::new(ctx, move || {
+               phoenix_ui_desktop::unregister_webview_script(&key);
+            })
+         },
+      )?,
+   )?;
+   ui.set(
+      "setNoNitroUpsell",
+      Function::new(ctx.clone(), |_enabled: bool| {}),
+   )?;
+   #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+   {
+      ui.set(
+         "setThemeColors",
+         Function::new(ctx.clone(), |ctx: Ctx<'js>, json: Option<String>| {
+            crate::theme::set_overrides(json.as_deref())
+               .map_err(|err| Exception::throw_message(&ctx, &err))
+         })?,
+      )?;
+      ui.set(
+         "setShowHiddenChannels",
+         Function::new(ctx.clone(), |ctx: Ctx<'js>, enabled: bool| {
+            crate::theme::set_show_hidden_channels(enabled)
+               .map_err(|err| Exception::throw_message(&ctx, &err))
+         })?,
+      )?;
+      ui.set(
+         "setBetterFolders",
+         Function::new(
+            ctx.clone(),
+            |sidebar: bool, close_others: bool, close_on_select: bool| {
+               crate::folders::set_options(sidebar, close_others, close_on_select);
+            },
+         )?,
+      )?;
+      ui.set(
+         "setBetterFoldersData",
+         Function::new(ctx.clone(), |ctx: Ctx<'js>, json: String| {
+            crate::folders::set_data(&json).map_err(|err| Exception::throw_message(&ctx, &err))
+         })?,
+      )?;
+      ui.set(
+         "collapseAllFolders",
+         Function::new(ctx.clone(), crate::folders::collapse_all)?,
+      )?;
+   }
+   ui.set(
       "notify",
       Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
          notify(&ctx, &notify_owner, &options)

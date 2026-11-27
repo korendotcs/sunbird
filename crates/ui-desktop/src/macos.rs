@@ -4,6 +4,7 @@
 //! thread, so the crate links nothing beyond libSystem.
 
 use std::{
+   collections::BTreeMap,
    ffi::{
       CStr,
       CString,
@@ -18,7 +19,15 @@ use std::{
    },
    ptr,
    sync::{
+      LazyLock,
+      Mutex,
       Once,
+      PoisonError,
+      atomic::{
+         AtomicBool,
+         AtomicUsize,
+         Ordering,
+      },
       mpsc,
    },
    thread,
@@ -78,6 +87,160 @@ impl DesktopHost for Host {
       spawn_reaped(Command::new("/usr/bin/open").arg("--").arg(target))
    }
 
+   fn speak(text: &str) -> Result<(), Error> {
+      spawn_reaped(Command::new("/usr/bin/say").arg("--").arg(text))
+   }
+
+   fn set_always_on_top(enabled: bool) -> Result<(), Error> {
+      const NS_NORMAL_WINDOW_LEVEL: isize = 0;
+      const NS_FLOATING_WINDOW_LEVEL: isize = 3;
+      let level = if enabled {
+         NS_FLOATING_WINDOW_LEVEL
+      } else {
+         NS_NORMAL_WINDOW_LEVEL
+      };
+      on_main(move || {
+         // SAFETY: on the main thread; every AppKit object is checked for nil.
+         unsafe {
+            let app = send(class(c"NSApplication"), sel(c"sharedApplication"));
+            let windows = send(app, sel(c"windows"));
+            if windows.is_null() {
+               return;
+            }
+            let count = send_usize(windows, sel(c"count"));
+            for at in 0..count {
+               let window = send_index(windows, sel(c"objectAtIndex:"), at);
+               if window.is_null() || !send_get_bool(window, sel(c"isVisible")) {
+                  continue;
+               }
+               send_isize(window, sel(c"setLevel:"), level);
+            }
+         }
+      });
+      Ok(())
+   }
+
+   fn set_window_title(title: &str) -> Result<(), Error> {
+      let title = title.to_owned();
+      on_main(move || {
+         // SAFETY: on the main thread; every AppKit object is checked for nil.
+         unsafe {
+            let app = send(class(c"NSApplication"), sel(c"sharedApplication"));
+            let windows = send(app, sel(c"windows"));
+            if windows.is_null() {
+               return;
+            }
+            let count = send_usize(windows, sel(c"count"));
+            for at in 0..count {
+               let window = send_index(windows, sel(c"objectAtIndex:"), at);
+               if window.is_null() || !send_get_bool(window, sel(c"isVisible")) {
+                  continue;
+               }
+               send_id(window, sel(c"setTitle:"), ns_string(&title));
+            }
+         }
+      });
+      Ok(())
+   }
+
+   fn quick_look(url: &str) -> Result<(), Error> {
+      let url = url.to_owned();
+      let _ = thread::Builder::new()
+         .name("sunbird-quicklook".to_owned())
+         .spawn(move || {
+            let Ok(home) = std::env::var("HOME") else {
+               return;
+            };
+            let cache_dir = PathBuf::from(home).join("Library/Caches/sunbird/ql");
+            let _ = std::fs::create_dir_all(&cache_dir);
+            let path_part = url.split('?').next().unwrap_or(&url);
+            let ext = path_part
+               .rsplit('.')
+               .next()
+               .filter(|e| e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+               .unwrap_or("png");
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for b in url.as_bytes() {
+               hash ^= u64::from(*b);
+               hash = hash.wrapping_mul(0x0100_0000_01b3);
+            }
+            let dest = cache_dir.join(format!("{hash:016x}.{ext}"));
+            let ok = Command::new("/usr/bin/curl")
+               .args(["-fsSL", "--max-time", "15", "-o"])
+               .arg(&dest)
+               .arg(&url)
+               .stdin(Stdio::null())
+               .stdout(Stdio::null())
+               .stderr(Stdio::null())
+               .status()
+               .is_ok_and(|s| s.success());
+            if !ok {
+               log::warn!("quicklook: failed to download {url}");
+               return;
+            }
+            if let Err(err) = spawn_reaped(Command::new("/usr/bin/qlmanage").arg("-p").arg(&dest)) {
+               log::warn!("quicklook: {err}");
+            }
+         });
+      Ok(())
+   }
+
+   fn media_control(player: &str, cmd: &str) -> Result<String, Error> {
+      let script = match (player, cmd) {
+         ("spotify", "playpause") => "tell application \"Spotify\" to playpause",
+         ("spotify", "next") => "tell application \"Spotify\" to next track",
+         ("spotify", "previous") => "tell application \"Spotify\" to previous track",
+         ("spotify", "state") => {
+            "if application \"Spotify\" is running then\n\
+             tell application \"Spotify\"\n\
+             if player state is stopped then return \"stopped\"\n\
+             return (player state as text) & \"\t\" & (name of current track) & \"\t\" & (artist of current track) & \"\t\" & (album of current track)\n\
+             end tell\n\
+             else\n\
+             return \"not_running\"\n\
+             end if"
+         },
+         ("music", "playpause") => "tell application \"Music\" to playpause",
+         ("music", "next") => "tell application \"Music\" to next track",
+         ("music", "previous") => "tell application \"Music\" to previous track",
+         ("music", "state") => {
+            "if application \"Music\" is running then\n\
+             tell application \"Music\"\n\
+             if player state is stopped then return \"stopped\"\n\
+             return (player state as text) & \"\t\" & (name of current track) & \"\t\" & (artist of current track) & \"\t\" & (album of current track)\n\
+             end tell\n\
+             else\n\
+             return \"not_running\"\n\
+             end if"
+         },
+         _ => {
+            return Err(Error::Platform {
+               message: format!("unsupported media control: {player}/{cmd}"),
+            });
+         },
+      };
+      let out = Command::new("/usr/bin/osascript")
+         .args(["-e", script])
+         .stdin(Stdio::null())
+         .output()
+         .map_err(|err| {
+            Error::Platform {
+               message: format!("osascript: {err}"),
+            }
+         })?;
+      if !out.status.success() {
+         let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+         return Err(Error::Platform {
+            message: if err.is_empty() {
+               "media control failed".to_owned()
+            } else {
+               err
+            },
+         });
+      }
+      Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+   }
+
    fn pick_js_path() -> Option<PathBuf> {
       let (tx, rx) = mpsc::channel();
       on_main(move || {
@@ -108,11 +271,32 @@ impl DesktopHost for Host {
       }
    }
 
+   fn set_youtube_adblock(enabled: bool) {
+      YOUTUBE_ADBLOCK.store(enabled, Ordering::Relaxed);
+      on_main(install_webkit_adblock);
+   }
+
+   fn register_webview_script(id: &str, js: &str) {
+      WEBVIEW_SCRIPTS
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .insert(id.to_owned(), js.to_owned());
+      on_main(install_webkit_adblock);
+   }
+
+   fn unregister_webview_script(id: &str) {
+      WEBVIEW_SCRIPTS
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .remove(id);
+   }
+
    fn start_tray() {
       static STARTED: Once = Once::new();
       STARTED.call_once(|| {
          on_main(start_status_item);
          on_main(start_shortcuts);
+         on_main(install_webkit_adblock);
       });
    }
 }
@@ -253,6 +437,9 @@ unsafe extern "C" {
    fn objc_allocateClassPair(superclass: Id, name: *const c_char, extra: usize) -> Id;
    fn objc_registerClassPair(class: Id);
    fn class_addMethod(class: Id, name: Sel, imp: *const c_void, types: *const c_char) -> bool;
+   fn class_getInstanceMethod(class: Id, name: Sel) -> *mut c_void;
+   fn method_getImplementation(method: *mut c_void) -> *const c_void;
+   fn method_setImplementation(method: *mut c_void, imp: *const c_void) -> *const c_void;
 }
 
 unsafe extern "C" {
@@ -311,6 +498,141 @@ msg_send!(send_monitor(mask: u64, handler: *const Block) -> Id);
 msg_send!(send_symbol(name: Id, description: Id) -> Id);
 msg_send!(send_item(title: Id, action: Sel, key: Id) -> Id);
 msg_send!(send_tag() -> isize);
+msg_send!(send_user_script(source: Id, injection_time: isize, main_frame_only: bool) -> Id);
+
+static YOUTUBE_ADBLOCK: AtomicBool = AtomicBool::new(true);
+static ORIG_WK_UCC_INIT: AtomicUsize = AtomicUsize::new(0);
+static WEBVIEW_SCRIPTS: LazyLock<Mutex<BTreeMap<String, String>>> =
+   LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+const YT_ADBLOCK_JS: &str = r#"(() => {
+  const h = (location && location.hostname) || "";
+  if (!/(^|\.)(youtube\.com|youtube-nocookie\.com|youtu\.be)$/.test(h)) return;
+  if (window.__sunbirdYtAdblock) return;
+  window.__sunbirdYtAdblock = true;
+  const strip = (obj) => {
+    if (!obj || typeof obj !== "object") return obj;
+    for (const k of ["adPlacements", "playerAds", "adSlots", "adBreakHeartbeatParams"]) {
+      if (k in obj) obj[k] = Array.isArray(obj[k]) ? [] : undefined;
+    }
+    return obj;
+  };
+  const origParse = JSON.parse;
+  JSON.parse = function (...args) {
+    return strip(origParse.apply(this, args));
+  };
+  if (typeof Response !== "undefined" && Response.prototype && Response.prototype.json) {
+    const origJson = Response.prototype.json;
+    Response.prototype.json = function () {
+      return origJson.call(this).then(strip);
+    };
+  }
+  const injectCss = () => {
+    if (!document.head || document.getElementById("sunbird-yt-adblock")) return;
+    const s = document.createElement("style");
+    s.id = "sunbird-yt-adblock";
+    s.textContent = ".ytp-ad-module,.ytp-ad-overlay-container,.ytp-ad-player-overlay,ytd-ad-slot-renderer,ytd-in-feed-ad-layout-renderer,ytd-promoted-sparkles-web-renderer,#masthead-ad,.ytp-ad-action-interstitial{display:none!important;}";
+    document.head.appendChild(s);
+  };
+  const skip = () => {
+    injectCss();
+    for (const sel of [".ytp-ad-skip-button", ".ytp-ad-skip-button-modern", ".ytp-skip-ad-button", ".ytp-ad-overlay-close-button"]) {
+      const btn = document.querySelector(sel);
+      if (btn) btn.click();
+    }
+    const player = document.querySelector(".html5-video-player.ad-showing");
+    if (player) {
+      const v = player.querySelector("video");
+      if (v && Number.isFinite(v.duration) && v.duration > 0) {
+        v.muted = true;
+        v.currentTime = v.duration;
+      }
+    }
+  };
+  document.addEventListener("DOMContentLoaded", skip, { once: true });
+  setInterval(skip, 400);
+})();"#;
+
+/// # Safety
+///
+/// `controller` must be a live `WKUserContentController` on a valid `WebKit` thread.
+unsafe fn attach_user_script(controller: Id, source: &str) {
+   // SAFETY: forwarded from caller; every ObjC object is checked for nil.
+   unsafe {
+      let script_cls = class(c"WKUserScript");
+      if script_cls.is_null() {
+         return;
+      }
+      let alloc = send(script_cls, sel(c"alloc"));
+      if alloc.is_null() {
+         return;
+      }
+      let script = send_user_script(
+         alloc,
+         sel(c"initWithSource:injectionTime:forMainFrameOnly:"),
+         ns_string(source),
+         0,
+         false,
+      );
+      if !script.is_null() {
+         send_id_unit(controller, sel(c"addUserScript:"), script);
+         send_id_unit(script, sel(c"release"), ptr::null_mut());
+      }
+   }
+}
+
+extern "C" fn swizzled_wk_ucc_init(this: Id, selector: Sel) -> Id {
+   let orig = ORIG_WK_UCC_INIT.load(Ordering::Acquire);
+   if orig == 0 {
+      return ptr::null_mut();
+   }
+   // SAFETY: `orig` is the original `-[WKUserContentController init]` IMP.
+   let controller = unsafe {
+      let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(orig);
+      f(this, selector)
+   };
+   if !controller.is_null() {
+      if YOUTUBE_ADBLOCK.load(Ordering::Relaxed) {
+         // SAFETY: `controller` is a live `WKUserContentController`.
+         unsafe { attach_user_script(controller, YT_ADBLOCK_JS) };
+      }
+      let scripts: Vec<String> = WEBVIEW_SCRIPTS
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .values()
+         .cloned()
+         .collect();
+      for js in &scripts {
+         // SAFETY: `controller` is a live `WKUserContentController`.
+         unsafe { attach_user_script(controller, js) };
+      }
+   }
+   controller
+}
+
+fn install_webkit_adblock() {
+   static INSTALLED: Once = Once::new();
+   INSTALLED.call_once(|| {
+      // SAFETY: swizzles `-[WKUserContentController init]` once on the main thread.
+      unsafe {
+         let cls = class(c"WKUserContentController");
+         if cls.is_null() {
+            return;
+         }
+         let method = class_getInstanceMethod(cls, sel(c"init"));
+         if method.is_null() {
+            return;
+         }
+         let orig = method_getImplementation(method);
+         if orig.is_null() {
+            return;
+         }
+         ORIG_WK_UCC_INIT.store(orig as usize, Ordering::Release);
+         let _ = method_setImplementation(method, swizzled_wk_ucc_init as *const c_void);
+         log::info!("webview: YouTube AdBlock WKUserContentController hook installed");
+      }
+   });
+}
 
 mod panel;
 

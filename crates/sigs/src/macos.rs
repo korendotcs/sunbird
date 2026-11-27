@@ -2234,6 +2234,203 @@ pub fn access_enforced(image: &Image<'_>, read: usize) -> Found<usize> {
 /// `mov w0, #0; ret`: returns `false` from `pages_under_frame`.
 pub const PAGES_OVER_FRAME: [u8; 8] = [0x00, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6];
 
+/// `mov w0, #1; ret`: forces a boolean predicate to return `true`.
+pub const RETURN_TRUE: [u8; 8] = [0x20, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6];
+
+/// `SwitchAccountsNotice::add_pressed` (`UnlimitedAccounts`) on macOS arm64.
+///
+/// Compares the account count against 5 (`cmp x1, #5`) before deciding whether
+/// to allow adding another account. Patching entry with [`RETURN_TRUE`] unlocks
+/// unlimited accounts in the account switcher.
+pub fn unlimited_accounts(image: &Image<'_>) -> Found<usize> {
+   const PAT: Pattern = Pattern::new(
+      "F4 03 01 AA 3F 14 00 F1 ?? ?? 00 54 F3 03 00 AA 28 00 80 52 08 ?? 00 39",
+   );
+   let hit = one("unlimited_accounts", &image.scan(PAT))?;
+   let entry = hit
+      .checked_sub(0xC)
+      .filter(|&addr| image.is_function(addr))
+      .ok_or_else(|| format!("unlimited_accounts entry before {hit:#x} is not a function"))?;
+   Ok(entry)
+}
+
+/// `libdiscord_state::vad_permission::Cache::can_use_voice_activity`
+/// (`NoPushToTalk`) on macOS arm64.
+///
+/// Checks bit 25 (`USE_VAD`) of channel permissions. Patching entry with
+/// [`RETURN_TRUE`] lets voice activity work in push-to-talk-only channels.
+pub fn no_push_to_talk(image: &Image<'_>) -> Found<usize> {
+   const PAT: Pattern = Pattern::new("?? ?? ?? 94 28 00 80 52 ?? ?? C8 37");
+   let hit = one("no_push_to_talk", &image.scan(PAT))?;
+   image
+      .function_bounds(hit)
+      .map(|(start, _)| start)
+      .ok_or_else(|| format!("no_push_to_talk at {hit:#x} has no function bounds"))
+}
+
+/// `ShowHiddenChannels` branch sites in `channel_tree_gated` and
+/// `visible_channels_by_position` on macOS arm64.
+///
+/// Each site calls the same `permissions_for` helper and branches on
+/// `tbnz w0, #10, dest` (`VIEW_CHANNEL`) right before a hash-map fallback
+/// (`mov x20, #0; lsr x8, x0, #57`). Returns `(pc, b_insn)` pairs where
+/// `b_insn` is an unconditional `b dest` replacing the `tbnz`.
+pub fn show_hidden_channels(image: &Image<'_>) -> Found<Vec<(usize, u32)>> {
+   const FALLBACK: Pattern = Pattern::new("14 00 80 D2 08 FC 79 D3");
+   const LOOKBACK: usize = 10;
+
+   let mut by_callee: HashMap<usize, Vec<(usize, u32)>> = HashMap::new();
+   for hit in image.scan(FALLBACK) {
+      for back in 1..=LOOKBACK {
+         let Some(pc) = hit.checked_sub(back * 4) else {
+            break;
+         };
+         let Some(prev_pc) = pc.checked_sub(4) else {
+            break;
+         };
+         let (
+            Some(Insn::Bl { target: callee }),
+            Some(Insn::Tbz {
+               rt: 0,
+               bit: 10,
+               nonzero: true,
+               target: dest,
+            }),
+         ) = (decode_at(image, prev_pc), decode_at(image, pc))
+         else {
+            continue;
+         };
+         let delta = dest.wrapping_sub(pc).cast_signed() >> 2;
+         #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "arm64 B imm26 encodes a signed 26-bit word offset"
+         )]
+         let b_insn = 0x1400_0000_u32 | ((delta as u32) & 0x03FF_FFFF);
+         by_callee.entry(callee).or_default().push((pc, b_insn));
+         break;
+      }
+   }
+
+   let mut groups: Vec<Vec<(usize, u32)>> = by_callee
+      .into_values()
+      .filter(|sites| sites.len() == 3)
+      .collect();
+   if groups.len() != 1 {
+      return Err(format!(
+         "show_hidden_channels: expected 1 group of 3 sites, found {}",
+         groups.len()
+      ));
+   }
+   let mut sites = groups.remove(0);
+   sites.sort_unstable_by_key(|&(pc, _)| pc);
+   sites.dedup_by_key(|&mut (pc, _)| pc);
+   Ok(sites)
+}
+
+/// Embedded Mana theme palette JSON parser (`parse(ptr, len) -> Result` with
+/// arm64 `x8` sret) on macOS arm64.
+///
+/// Locates the unique `"mana-gpui/tools/gen_tokens.py"` anchor in `__TEXT`,
+/// scans back to `{`, follows its one `adrp` code reference, and takes the
+/// first `bl` target.
+pub fn theme_json_parse(image: &Image<'_>) -> Found<usize> {
+   const ANCHOR: &[u8] = b"mana-gpui/tools/gen_tokens.py";
+   const BACK_SCAN: usize = 256;
+   const FWD_INSNS: usize = 12;
+
+   let anchor = one("theme_json anchor", &image.find_bytes(ANCHOR))?;
+   let start_base = anchor.saturating_sub(BACK_SCAN);
+   let prefix = image
+      .read(start_base, anchor - start_base)
+      .ok_or_else(|| format!("theme_json prefix before {anchor:#x} unreadable"))?;
+   let brace = prefix
+      .iter()
+      .rposition(|&b| b == b'{')
+      .ok_or_else(|| format!("theme_json opening brace not found before {anchor:#x}"))?;
+   let blob_start = start_base + brace;
+
+   let refs = refs_to(image, &[blob_start]);
+   let (site, _) = one("theme_json loader ref", &refs)?;
+   let parse = decoded(image, site, FWD_INSNS)
+      .into_iter()
+      .find_map(pick!(Insn::Bl { target } if image.is_function(target) => target))
+      .ok_or_else(|| format!("theme_json parse call not found after {site:#x}"))?;
+   Ok(parse)
+}
+
+/// `mov w8, #0x43fa0000` (`500.0f` IEEE-754): raises Discord's `200.0f`
+/// (`0x43480000`) per-user voice volume ceiling to 500%.
+pub const VOLUME_BOOST_500: [u8; 4] = [0x48, 0x7F, 0xA8, 0x52];
+
+/// `VolumeBooster` clamp sites (`mov w8, #0x43480000` = `200.0f`) inside
+/// `set_local_volume_from` and its sibling volume setter on macOS arm64.
+pub fn volume_booster(image: &Image<'_>) -> Found<Vec<usize>> {
+   // fcsel s0, s0, s8, mi; mov w8, #0x43480000; fmov s1, w8; fcmp s0, s1; fcsel s8, s1, s0, gt
+   const PAT: Pattern = Pattern::new("00 4C 28 1E 08 69 A8 52 01 01 27 1E 00 20 21 1E 28 CC 20 1E");
+   let sites: Vec<usize> = image.scan(PAT).into_iter().map(|hit| hit + 4).collect();
+   if sites.is_empty() || sites.len() > 4 {
+      return Err(format!(
+         "volume_booster: expected 1..=4 clamp sites, found {}",
+         sites.len()
+      ));
+   }
+   Ok(sites)
+}
+
+/// `canStreamWithSettings` (`BetterScreenshare` / HD 60fps unlock) on macOS
+/// arm64.
+///
+/// The single function referencing `"canStreamWithSettings"`. Patching entry
+/// with [`RETURN_TRUE`] unlocks 1080p/Source/60fps Go Live presets.
+pub fn better_screenshare(image: &Image<'_>) -> Found<usize> {
+   const ANCHOR: &[u8] = b"canStreamWithSettings";
+   let anchor = one("canStreamWithSettings anchor", &image.find_bytes(ANCHOR))?;
+   one("can_stream_with_settings", &loaders(image, &[anchor]))
+}
+
+/// `(toggle_guild_folder, collapse_guild_folders)` in
+/// `libdiscord::ops::guild_folder_analytics::Client` on macOS arm64.
+///
+/// `collapse_guild_folders` has a unique prologue right after
+/// `toggle_guild_folder`; hooking `toggle_guild_folder` enables real
+/// `BetterFolders` accordion mode (close other folders when opening one) and
+/// collapsing all folders on demand.
+pub fn guild_folders(image: &Image<'_>) -> Found<(usize, usize)> {
+   const COLLAPSE_PROLOGUE: Pattern = Pattern::new(
+      "FF 83 01 D1 F4 4F 04 A9 FD 7B 05 A9 FD 43 01 91 E1 03 00 AA 08 01 80 52 FF A3 00 A9 FF 0F 00 F9",
+   );
+   const TOGGLE_EOR: Pattern = Pattern::new("60 02 00 52 FD 7B 46 A9");
+   let collapse = one("collapse_guild_folders", &image.scan(COLLAPSE_PROLOGUE))?;
+   let (toggle, _) = image
+      .function_bounds(collapse.saturating_sub(4))
+      .ok_or_else(|| format!("toggle_guild_folder before {collapse:#x} has no bounds"))?;
+   let body = image
+      .read(toggle, collapse - toggle)
+      .ok_or_else(|| format!("toggle_guild_folder at {toggle:#x} unreadable"))?;
+   if TOGGLE_EOR.find_in(body).is_empty() {
+      return Err(format!(
+         "function before collapse_guild_folders at {toggle:#x} is not toggle_guild_folder"
+      ));
+   }
+   Ok((toggle, collapse))
+}
+
+/// `gpui::view::any_view::render::<Workspace>` on macOS arm64.
+///
+/// Identified by the unique 128-bit `TypeId::of::<Workspace>()` literal loaded
+/// into `x22`/`x23` near entry; returns a `RawAnyElement` via `x8` sret.
+pub fn rail_view_render(image: &Image<'_>) -> Found<usize> {
+   const TYPE_ID: Pattern = Pattern::new(
+      "36 B6 99 D2 D6 FF AD F2 D6 3A CF F2 76 BA F8 F2 17 A5 9B D2 77 DD AF F2 17 37 CD F2 37 F9 FF F2",
+   );
+   let hit = one("workspace_render TypeId", &image.scan(TYPE_ID))?;
+   image
+      .function_bounds(hit)
+      .map(|(start, _)| start)
+      .ok_or_else(|| format!("workspace_render at {hit:#x} has no function bounds"))
+}
+
 /// `discord_desktop_platform::webview::pages_under_frame` on macOS.
 ///
 /// Release builds ignore `LIBDISCORD_MAC_PAGES_OVER_FRAME`, so callers of the

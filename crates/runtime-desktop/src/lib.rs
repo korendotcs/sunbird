@@ -37,6 +37,10 @@ mod sidebar;
 mod staff;
 mod theme_css;
 mod toolbar;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) mod folders;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) mod theme;
 
 use std::{
    ffi::c_void,
@@ -203,6 +207,11 @@ pub fn prepare() -> Result<(), Error> {
    phoenix_runtime::set_platform(&Desktop);
    let image = phoenix_runtime::target()?;
    open_access_gate(&image);
+   #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+   {
+      theme::install(&image);
+      folders::install(&image);
+   }
    settings::install(&image);
    #[cfg(windows)]
    restart::install(&image);
@@ -293,6 +302,7 @@ fn open_access_gate(image: &Image<'static>) {
    } else {
       close_enforced(image);
       keep_pages_over_frame(image);
+      unlock_native_tweaks(image);
       phoenix_sigs::macos::access_gate(image)
          .map(|access| (access, &phoenix_sigs::macos::NO_GATE[..]))
    };
@@ -340,6 +350,64 @@ fn keep_pages_over_frame(image: &Image<'static>) {
    match unsafe { image.write_code(func, &phoenix_sigs::macos::PAGES_OVER_FRAME) } {
       Ok(()) => log::info!("webview: pages_under_frame disabled @ {func:#x}"),
       Err(err) => log::error!("webview pages_under_frame: {err}"),
+   }
+}
+
+/// Applies native macOS arm64 Equicord-style client unlocks (`UnlimitedAccounts`
+/// and `NoPushToTalk`) before Discord's threads start.
+fn unlock_native_tweaks(image: &Image<'static>) {
+   for (name, found) in [
+      (
+         "unlimited_accounts",
+         phoenix_sigs::macos::unlimited_accounts(image),
+      ),
+      ("no_push_to_talk", phoenix_sigs::macos::no_push_to_talk(image)),
+      (
+         "better_screenshare",
+         phoenix_sigs::macos::better_screenshare(image),
+      ),
+   ] {
+      match found {
+         Ok(func) => {
+            // SAFETY: Discord's own code, written from the constructor before it runs.
+            match unsafe { image.write_code(func, &phoenix_sigs::macos::RETURN_TRUE) } {
+               Ok(()) => log::info!("native tweak: {name} enabled @ {func:#x}"),
+               Err(err) => log::error!("native tweak {name}: {err}"),
+            }
+         },
+         Err(err) => log::warn!("native tweak {name}: {err}, skipping"),
+      }
+   }
+   match phoenix_sigs::macos::volume_booster(image) {
+      Ok(sites) => {
+         let mut patched = 0usize;
+         for pc in sites {
+            // SAFETY: Discord's own code, written from the constructor before it runs.
+            match unsafe { image.write_code(pc, &phoenix_sigs::macos::VOLUME_BOOST_500) } {
+               Ok(()) => patched += 1,
+               Err(err) => log::error!("native tweak volume_booster @ {pc:#x}: {err}"),
+            }
+         }
+         log::info!("native tweak: volume_booster (500%) patched {patched} sites");
+      },
+      Err(err) => log::warn!("native tweak volume_booster: {err}, skipping"),
+   }
+   #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+   if theme::hidden_channels_flag_path().is_some_and(|p| p.exists()) {
+      match phoenix_sigs::macos::show_hidden_channels(image) {
+         Ok(sites) => {
+            let mut patched = 0usize;
+            for (pc, b_insn) in sites {
+               // SAFETY: Discord's own code, written from the constructor before it runs.
+               match unsafe { image.write_code(pc, &b_insn.to_le_bytes()) } {
+                  Ok(()) => patched += 1,
+                  Err(err) => log::error!("native tweak show_hidden_channels @ {pc:#x}: {err}"),
+               }
+            }
+            log::info!("native tweak: show_hidden_channels patched {patched}/3 sites");
+         },
+         Err(err) => log::warn!("native tweak show_hidden_channels: {err}, skipping"),
+      }
    }
 }
 

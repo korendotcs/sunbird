@@ -1541,6 +1541,37 @@ declare namespace Phoenix {
     disableHaptics?(): Remover;
     /// Copies `text` to the device clipboard.
     copy(text: string): void;
+    /// Opens `url` in the system's default browser or native app handler (`https://`, `http://`,
+    /// `discord://`, `spotify:`, `steam://`, `music://`, `x-github-client://`). Desktop only.
+    openUrl?(url: string): void;
+    /// Speaks `text` aloud using the OS text-to-speech engine (macOS `say`). Desktop only.
+    speak?(text: string): void;
+    /// Pins or unpins visible Discord windows above other windows. Desktop only.
+    setAlwaysOnTop?(enabled: boolean): void;
+    /// Sets the window title of visible Discord windows. Desktop only.
+    setWindowTitle?(title: string): void;
+    /// Downloads a Discord CDN media URL and previews it in native macOS QuickLook. Desktop only.
+    quickLook?(url: string): void;
+    /// Controls local Spotify or Apple Music playback (`playpause`, `next`, `previous`, `state`). Desktop only.
+    mediaControl?(player: "spotify" | "music", cmd: "playpause" | "next" | "previous" | "state"): string;
+    /// Saves JSON Mana theme overrides (`{ "all": { "token": "#rrggbbaa" }, ... }`) for next launch, or `null` to reset. macOS arm64 only.
+    setThemeColors?(overridesJson: string | null): void;
+    /// Enables or disables native `ShowHiddenChannels` for next launch. macOS arm64 only.
+    setShowHiddenChannels?(enabled: boolean): void;
+    /// Configures native `BetterFolders` (Folder Sidebar column, accordion mode, close on select). macOS arm64 only.
+    setBetterFolders?(sidebar: boolean, closeOthers: boolean, closeOnSelect: boolean): void;
+    /// Passes Discord's guild folder map JSON (`{ [folderId]: { name, guilds: [{ id, name }] } }`) to the native Folder Sidebar. macOS arm64 only.
+    setBetterFoldersData?(json: string): void;
+    /// Collapses all currently open guild folders in Discord's sidebar. macOS arm64 only.
+    collapseAllFolders?(): boolean;
+    /// Enables or disables native `WKWebView` YouTube ad-blocking for embedded webviews. macOS only.
+    setYoutubeAdblock?(enabled: boolean): void;
+    /// Injects a JS script at `document_start` into all frames of every embedded `WKWebView` spawned by Discord Phoenix. Returns a remover. macOS only.
+    addWebviewScript?(id: string, js: string): Remover;
+    /// Injects CSS into all frames of every embedded `WKWebView` spawned by Discord Phoenix. Returns a remover. macOS only.
+    addWebviewCss?(id: string, css: string): Remover;
+    /// Toggles extra native Nitro upsell hiding where supported. Desktop only.
+    setNoNitroUpsell?(enabled: boolean): void;
     /// A short message at the bottom of the screen, in a banner at the top on iOS, or in a banner
     /// in the bottom right corner on desktop.
     toast(text: string): void;

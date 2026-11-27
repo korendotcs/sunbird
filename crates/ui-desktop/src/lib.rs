@@ -154,6 +154,43 @@ trait DesktopHost {
       Err(Error::Unsupported)
    }
 
+   /// Speaks `text` aloud using the system text-to-speech engine.
+   fn speak(_text: &str) -> Result<(), Error> {
+      Err(Error::Unsupported)
+   }
+
+   /// Pins or unpins visible Discord windows above other apps.
+   fn set_always_on_top(_enabled: bool) -> Result<(), Error> {
+      Err(Error::Unsupported)
+   }
+
+   /// Sets the title of visible Discord windows.
+   fn set_window_title(_title: &str) -> Result<(), Error> {
+      Err(Error::Unsupported)
+   }
+
+   /// Downloads a Discord media URL and previews it in native `QuickLook`.
+   fn quick_look(_url: &str) -> Result<(), Error> {
+      Err(Error::Unsupported)
+   }
+
+   /// Controls a supported local media player (`spotify` or `music`) using a
+   /// fixed command allowlist (`playpause`, `next`, `previous`, `state`).
+   fn media_control(_player: &str, _cmd: &str) -> Result<String, Error> {
+      Err(Error::Unsupported)
+   }
+
+   /// Enables or disables native `WKWebView` `YouTube` ad-blocking for embedded
+   /// webviews (such as Watch Together).
+   fn set_youtube_adblock(_enabled: bool) {}
+
+   /// Registers a `WKUserScript` injected at document start into every embedded
+   /// webview (all frames).
+   fn register_webview_script(_id: &str, _js: &str) {}
+
+   /// Removes a previously registered webview script.
+   fn unregister_webview_script(_id: &str) {}
+
    /// Asks for a `.js` file with the native picker.
    fn pick_js_path() -> Option<PathBuf> {
       None
@@ -252,10 +289,18 @@ pub fn pick_js_file() -> Option<(String, Vec<u8>)> {
 
 /// Opens `url` in the system's default browser / handler.
 pub fn open_url(url: &str) -> Result<(), Error> {
-   if !url.starts_with("https://") && !url.starts_with("http://") && !url.starts_with("discord://")
-   {
+   const ALLOWED_SCHEMES: &[&str] = &[
+      "https://",
+      "http://",
+      "discord://",
+      "spotify:",
+      "steam://",
+      "music://",
+      "x-github-client://",
+   ];
+   if !ALLOWED_SCHEMES.iter().any(|scheme| url.starts_with(scheme)) {
       return Err(Error::Platform {
-         message: format!("refusing to open non-web URL: {url}"),
+         message: format!("refusing to open disallowed URL scheme: {url}"),
       });
    }
    Os::open(url)
@@ -273,6 +318,65 @@ pub fn show_in_app(show: impl Fn(&str, Option<&str>) -> bool + Send + Sync + 'st
 
 fn in_app(title: &str, body: Option<&str>) -> bool {
    IN_APP.get().is_some_and(|show| show(title, body))
+}
+
+/// Speaks `text` aloud using the OS text-to-speech engine (macOS `say`).
+pub fn speak(text: &str) -> Result<(), Error> {
+   let trimmed = text.trim();
+   if trimmed.is_empty() {
+      return Ok(());
+   }
+   Os::speak(trimmed)
+}
+
+/// Pins or unpins Discord's visible windows above other windows.
+pub fn set_always_on_top(enabled: bool) -> Result<(), Error> {
+   Os::set_always_on_top(enabled)
+}
+
+/// Sets the title of Discord's visible windows.
+pub fn set_window_title(title: &str) -> Result<(), Error> {
+   Os::set_window_title(title)
+}
+
+/// Opens a Discord CDN image/media URL in native macOS `QuickLook` (zoomable
+/// preview).
+pub fn quick_look(url: &str) -> Result<(), Error> {
+   const ALLOWED_HOSTS: &[&str] = &[
+      "https://cdn.discordapp.com/",
+      "https://media.discordapp.net/",
+      "https://images-ext-1.discordapp.net/",
+      "https://images-ext-2.discordapp.net/",
+   ];
+   if !ALLOWED_HOSTS.iter().any(|prefix| url.starts_with(prefix)) {
+      return Err(Error::Platform {
+         message: format!("refusing to QuickLook non-Discord media URL: {url}"),
+      });
+   }
+   Os::quick_look(url)
+}
+
+/// Controls local Spotify or Apple Music playback using a fixed allowlist of
+/// commands (`playpause`, `next`, `previous`, `state`).
+pub fn media_control(player: &str, cmd: &str) -> Result<String, Error> {
+   Os::media_control(player, cmd)
+}
+
+/// Enables or disables native `WKWebView` `YouTube` ad-blocking for embedded
+/// webviews (such as Watch Together).
+pub fn set_youtube_adblock(enabled: bool) {
+   Os::set_youtube_adblock(enabled);
+}
+
+/// Registers a JS script injected at `document_start` into every embedded
+/// `WKWebView` spawned by Discord Phoenix (Activities, Watch Together, etc.).
+pub fn register_webview_script(id: &str, js: &str) {
+   Os::register_webview_script(id, js);
+}
+
+/// Unregisters a previously registered embedded webview script.
+pub fn unregister_webview_script(id: &str) {
+   Os::unregister_webview_script(id);
 }
 
 /// Shows a short desktop toast / notification message.

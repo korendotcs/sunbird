@@ -293,14 +293,70 @@ enum PluginFilter {
    Disabled,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CatalogCategory {
+   All,
+   Messaging,
+   Privacy,
+   Media,
+   Notifications,
+   Utility,
+   Fun,
+   Installed,
+}
+
+impl CatalogCategory {
+   const ALL: [Self; 8] = [
+      Self::All,
+      Self::Messaging,
+      Self::Privacy,
+      Self::Media,
+      Self::Notifications,
+      Self::Utility,
+      Self::Fun,
+      Self::Installed,
+   ];
+
+   const fn label(self) -> &'static str {
+      match self {
+         Self::All => "All",
+         Self::Messaging => "Messaging",
+         Self::Privacy => "Privacy",
+         Self::Media => "Media",
+         Self::Notifications => "Notify",
+         Self::Utility => "Utility",
+         Self::Fun => "Fun",
+         Self::Installed => "Installed",
+      }
+   }
+
+   fn matches(self, item: &Listed, is_installed: bool) -> bool {
+      match self {
+         Self::All => true,
+         Self::Installed => is_installed,
+         _ => {
+            let cat = item.category.as_deref().unwrap_or("Utility");
+            match self {
+               Self::Messaging => cat.eq_ignore_ascii_case("Messaging"),
+               Self::Privacy => cat.eq_ignore_ascii_case("Privacy"),
+               Self::Media => cat.eq_ignore_ascii_case("Media"),
+               Self::Notifications => cat.eq_ignore_ascii_case("Notifications"),
+               Self::Utility => cat.eq_ignore_ascii_case("Utility"),
+               Self::Fun => cat.eq_ignore_ascii_case("Fun"),
+               Self::All | Self::Installed => true,
+            }
+         },
+      }
+   }
+}
+
 struct UiState {
    tab:              Tab,
    filter:           PluginFilter,
+   search:           String,
+   cat_category:     CatalogCategory,
    expanded_plugins: HashSet<String>,
    open_select:      Option<(String, String)>,
-   cat_desktop_open: bool,
-   cat_partial_open: bool,
-   cat_mobile_open:  bool,
 }
 
 impl Default for UiState {
@@ -308,11 +364,10 @@ impl Default for UiState {
       Self {
          tab:              Tab::Plugins,
          filter:           PluginFilter::All,
+         search:           String::new(),
+         cat_category:     CatalogCategory::All,
          expanded_plugins: HashSet::new(),
          open_select:      None,
-         cat_desktop_open: true,
-         cat_partial_open: false,
-         cat_mobile_open:  false,
       }
    }
 }
@@ -323,6 +378,9 @@ static UI_STATE: LazyLock<Mutex<UiState>> = LazyLock::new(|| Mutex::new(UiState:
 enum Action {
    SetTab(Tab),
    SetFilter(PluginFilter),
+   SetCatalogCategory(CatalogCategory),
+   OpenSearch,
+   ClearSearch,
    ToggleExpandPlugin(String),
    ToggleSelectDropdown {
       plugin: String,
@@ -333,7 +391,6 @@ enum Action {
       key:    String,
       value:  String,
    },
-   ToggleCatalogGroup(u8),
    ToggleStaff,
    ReloadAll,
    OpenDevTools,
@@ -356,6 +413,8 @@ enum Action {
       key:    String,
    },
    InstallCatalog(String),
+   CloseFolderSidebar,
+   OpenFolderGuild(String),
 }
 
 static ACTIONS: LazyLock<Mutex<Vec<Action>>> = LazyLock::new(|| Mutex::new(Vec::new()));
@@ -433,6 +492,33 @@ unsafe extern "C" fn button_callback(
                .unwrap_or_else(PoisonError::into_inner)
                .filter = filter;
          },
+         Action::SetCatalogCategory(cat) => {
+            UI_STATE
+               .lock()
+               .unwrap_or_else(PoisonError::into_inner)
+               .cat_category = cat;
+         },
+         Action::OpenSearch => {
+            crate::modal::open_prompt(crate::modal::Prompt {
+               title:     "Search Plugins (leave blank to clear)".to_owned(),
+               on_submit: std::sync::Arc::new(|query| {
+                  query.trim().clone_into(
+                     &mut UI_STATE
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .search,
+                  );
+                  crate::modal::force_redraw();
+               }),
+            });
+         },
+         Action::ClearSearch => {
+            UI_STATE
+               .lock()
+               .unwrap_or_else(PoisonError::into_inner)
+               .search
+               .clear();
+         },
          Action::ToggleExpandPlugin(name) => {
             let mut ui = UI_STATE.lock().unwrap_or_else(PoisonError::into_inner);
             if !ui.expanded_plugins.remove(&name) {
@@ -455,14 +541,6 @@ unsafe extern "C" fn button_callback(
                .lock()
                .unwrap_or_else(PoisonError::into_inner)
                .open_select = None;
-         },
-         Action::ToggleCatalogGroup(group) => {
-            let mut ui = UI_STATE.lock().unwrap_or_else(PoisonError::into_inner);
-            match group {
-               0 => ui.cat_desktop_open = !ui.cat_desktop_open,
-               1 => ui.cat_partial_open = !ui.cat_partial_open,
-               _ => ui.cat_mobile_open = !ui.cat_mobile_open,
-            }
          },
          Action::ReloadAll => phoenix_runtime::reload_all(),
          Action::OpenDevTools => phoenix_ui_desktop::open_devtools(),
@@ -513,6 +591,7 @@ unsafe extern "C" fn button_callback(
                   Ok(installed) => {
                      log::info!("sunbird settings: {installed}");
                      phoenix_ui_desktop::toast(&installed.to_string());
+                     crate::modal::force_redraw();
                   },
                   Err(err) => {
                      log::warn!("sunbird settings: install {name}: {err}");
@@ -520,6 +599,15 @@ unsafe extern "C" fn button_callback(
                   },
                }
             });
+         },
+         Action::CloseFolderSidebar => {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            crate::folders::close_sidebar();
+         },
+         Action::OpenFolderGuild(guild_id) => {
+            let _ = phoenix_ui_desktop::open_url(&format!("discord://discord.com/channels/{guild_id}"));
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            crate::folders::on_guild_selected();
          },
          _ => {},
       }
@@ -1256,6 +1344,150 @@ pub fn wrap_with_accessories(
    true
 }
 
+/// Computes Discord's server-rail acronym (up to 3 characters: initials of
+/// words, or first 3 characters for single-word names).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn guild_acronym(name: &str) -> String {
+   let words: Vec<&str> = name
+      .split(|c: char| c.is_whitespace() || c == '-' || c == '_')
+      .filter(|w| !w.is_empty())
+      .collect();
+   if words.len() >= 2 {
+      words
+         .iter()
+         .take(3)
+         .filter_map(|w| w.chars().next())
+         .collect::<String>()
+         .to_uppercase()
+   } else {
+      name.chars().take(3).collect()
+   }
+}
+
+/// Wraps `Workspace`'s rendered `AnyElement` (`sret`) in a horizontal GPUI flex
+/// row with a dedicated 72px Discord-style `BetterFolders` Folder Sidebar rail
+/// on the left (pushing `Workspace` cleanly to the right with zero overlap).
+///
+/// # Safety
+///
+/// `sret` must point to a valid initialized `RawAnyElement` returned by
+/// `any_view::render::<Workspace>`.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub unsafe fn wrap_rail_with_folder_sidebar(
+   sret: *mut RawAnyElement,
+   _folder_name: &str,
+   guilds: &[(String, String)],
+) -> bool {
+   const RAIL_BG: [f32; 4] = [0.65, 0.05, 0.08, 1.0];
+   const BORDER: [f32; 4] = [0.65, 0.04, 0.22, 0.45];
+   const DIVIDER: [f32; 4] = [0.63, 0.06, 0.24, 0.85];
+   const TILE_BG: [f32; 4] = [0.63, 0.07, 0.20, 1.0];
+   const ALIGN_CENTER: u8 = 4;
+   const JUSTIFY_CENTER: u8 = 4;
+
+   let Some(sym) = SYMBOLS.get() else {
+      return false;
+   };
+   if sym.div_push_any.is_none() || sym.str_into_any.is_none() {
+      return false;
+   }
+   let b = Builder { sym };
+
+   // SAFETY: takes ownership of Discord's rendered `Workspace` `AnyElement`.
+   let mut orig = unsafe { ptr::read(sret) };
+
+   // Horizontal flex row: [ 72px Folder Sidebar Rail | Discord Workspace (remaining width) ]
+   let mut outer = chain(sym.div_flex, b.raw_div());
+   b.style_div(&mut outer, |s| {
+      s.lengths(&s.at.size, W_FULL);
+   });
+
+   // 72px Discord-native server rail column
+   let mut sidebar = b.v_stack(8.0);
+   b.style_div(&mut sidebar, |s| {
+      s.length(s.at.size[0], gpui_px(72.0));
+      s.length(s.at.size[1], W_FULL);
+      s.float(s.at.flex_shrink, 0.0);
+      s.set(s.at.align_items, ALIGN_CENTER);
+      s.solid_background(RAIL_BG);
+      s.length(s.at.border_widths[1], gpui_px(1.0));
+      s.hsla(s.at.border_color, BORDER);
+      s.length(s.at.padding[0], gpui_px(40.0)); // clear macOS traffic lights
+      s.length(s.at.padding[1], gpui_px(0.0));
+      s.length(s.at.padding[2], gpui_px(12.0));
+      s.length(s.at.padding[3], gpui_px(0.0));
+   });
+
+   // Compact circular close button at top of the folder rail
+   let mut close_tile = b.v_stack(0.0);
+   b.style_div(&mut close_tile, |s| {
+      s.length(s.at.size[0], gpui_px(48.0));
+      s.length(s.at.size[1], gpui_px(36.0));
+      s.set(s.at.align_items, ALIGN_CENTER);
+      s.set(s.at.justify_content, JUSTIFY_CENTER);
+   });
+   close_tile = b.push_button(
+      close_tile,
+      "bf-close",
+      "×",
+      BtnVariant::Secondary,
+      BtnSize::Small,
+      Action::CloseFolderSidebar,
+   );
+   sidebar = b.push_div(sidebar, close_tile);
+
+   // Discord's 32x2px rail divider
+   let mut divider = b.raw_div();
+   b.style_div(&mut divider, |s| {
+      s.length(s.at.size[0], gpui_px(32.0));
+      s.length(s.at.size[1], gpui_px(2.0));
+      s.lengths(&s.at.corner_radii, gpui_px(1.0));
+      s.solid_background(DIVIDER);
+   });
+   sidebar = b.push_div(sidebar, divider);
+
+   // 48x48 circular Discord server icon tiles
+   for (idx, (guild_id, label)) in guilds.iter().take(18).enumerate() {
+      let acronym = guild_acronym(label);
+      let mut tile = b.v_stack(0.0);
+      b.style_div(&mut tile, |s| {
+         s.length(s.at.size[0], gpui_px(48.0));
+         s.length(s.at.size[1], gpui_px(48.0));
+         s.lengths(&s.at.corner_radii, gpui_px(24.0));
+         s.set(s.at.align_items, ALIGN_CENTER);
+         s.set(s.at.justify_content, JUSTIFY_CENTER);
+         s.solid_background(TILE_BG);
+      });
+      tile = b.push_button(
+         tile,
+         &format!("bf-g-{idx}"),
+         &acronym,
+         BtnVariant::Secondary,
+         BtnSize::Small,
+         Action::OpenFolderGuild(guild_id.clone()),
+      );
+      sidebar = b.push_div(sidebar, tile);
+   }
+
+   outer = b.push_div(outer, sidebar);
+
+   // Workspace container taking the remaining width (no overlap!)
+   let mut ws_wrap = b.v_stack(0.0);
+   b.style_div(&mut ws_wrap, |s| {
+      s.lengths(&s.at.size, W_FULL);
+      s.length(s.at.min_size[0], gpui_px(0.0));
+   });
+   if !b.push_any(&mut ws_wrap, &mut orig) {
+      // SAFETY: restore original element if push failed.
+      unsafe { ptr::write(sret, orig) };
+      return false;
+   }
+   outer = b.push_div(outer, ws_wrap);
+
+   b.write_any(outer, sret);
+   true
+}
+
 /// Muted accessory text, for lines without a color of their own.
 const ACCESSORY_MUTED: [f32; 4] = [0.60, 0.08, 0.62, 0.85];
 
@@ -1466,6 +1698,9 @@ const DESKTOP_FULL: &[&str] = &[
    "message-logger",
    "no-profile-themes",
    "no-reply-mention",
+   "no-blocked-messages",
+   "no-pending-count",
+   "show-timeout-duration",
    "spoiler-mode",
    "text-replace",
    "view-raw",
@@ -1475,9 +1710,113 @@ const DESKTOP_FULL: &[&str] = &[
    "clear-urls",
    "fix-embeds",
    "platform-indicators",
+   // Equicord ports
+   "send-timestamps",
+   "split-large-messages",
+   "unindent",
+   "write-upper-case",
+   "normalize-message-links",
+   "silent-message-toggle",
+   "signature",
+   "talk-in-reverse",
+   "sed-enhanced",
+   "block-keywords",
+   "tone-indicators",
+   "anonymise-file-names",
+   "disable-call-idle",
+   "silence-users",
+   "one-ping-per-dm",
+   "no-typing-receive",
+   "copy-file-contents",
+   "copy-user-urls",
+   "reverse-image-search",
+   "unsuppress-embeds",
+   "base-decoder",
+   "unit-converter",
+   "user-messages-pronouns",
+   "relationship-notifier",
+   "voice-channel-log",
+   "better-sessions",
+   "ping-notifications",
+   "whos-watching",
+   "friend-invites",
+   "at-someone",
+   "quick-mention",
+   "word-count",
+   "snowflake-info",
+   "shrug-commands",
+   "repeat-message",
+   // Equicord ports (Opus 5.5 batches + native TTS)
+   "custom-rpc",
+   "status-while-active",
+   "better-invites",
+   "better-poll-details",
+   "reply-timestamp",
+   "show-badges-in-chat",
+   "show-roles-in-chat",
+   "read-all-notifications",
+   "call-timer",
+   "who-reacted",
+   "timezones",
+   "voice-rejoin",
+   "ignore-activities",
+   "auto-dnd",
+   "copy-emoji-markdown",
+   "voice-download",
+   "open-in-app",
+   "permissions-viewer",
+   "show-hidden-things",
+   "message-link-embeds",
+   "pin-icon",
+   "reaction-timestamps",
+   "server-info",
+   "user-voice-show",
+   "valid-reply",
+   "better-forwards",
+   "scheduled-messages",
+   "server-search",
+   "mutual-servers",
+   "content-warning",
+   "vc-narrator",
+   // Equicord ports (Batch 3 + native macOS/GPUI hooks)
+   "holy-notes",
+   "message-tags",
+   "user-notes",
+   "invisible-chat",
+   "typing-tweaks",
+   "quick-reply",
+   "fake-deafen",
+   "lastfm-rpc",
+   "anti-group-dm",
+   "phishing-warning",
+   "friend-tags",
+   "quest-completer",
+   "jump-to-start",
+   "replace-google-search",
+   "client-theme",
+   "image-zoom",
+   "spotify-controls",
+   "always-on-top",
+   "custom-window-title",
+   "show-hidden-channels",
+   "keep-current-channel",
+   "custom-idle",
+   "preview-message",
+   "member-count",
+   "banger-commands",
+   "youtube-adblock",
+   "no-nitro-upsell",
+   "custom-webview-css",
+   "channel-tabs",
+   "server-list-indicators",
+   "better-folders",
+   "decor",
+   "fake-profile-effects",
+   "shiki-codeblocks",
+   "fakenitro",
 ];
 
-const DESKTOP_PARTIAL: &[&str] = &["fakenitro"];
+const DESKTOP_PARTIAL: &[&str] = &[];
 
 const MOBILE_ONLY: &[&str] = &["hide-composer-buttons", "reviewdb", "taptap", "example"];
 
@@ -1537,16 +1876,15 @@ pub fn render_sunbird_page(sret: *mut RawAnyElement) -> bool {
       .unwrap_or_else(PoisonError::into_inner)
       .clear();
 
-   let (tab, filter, expanded_plugins, open_select, cat_desktop, cat_partial, cat_mobile) = {
+   let (tab, filter, search, cat_category, expanded_plugins, open_select) = {
       let ui = UI_STATE.lock().unwrap_or_else(PoisonError::into_inner);
       (
          ui.tab,
          ui.filter,
+         ui.search.clone(),
+         ui.cat_category,
          ui.expanded_plugins.clone(),
          ui.open_select.clone(),
-         ui.cat_desktop_open,
-         ui.cat_partial_open,
-         ui.cat_mobile_open,
       )
    };
 
@@ -1610,13 +1948,13 @@ pub fn render_sunbird_page(sret: *mut RawAnyElement) -> bool {
             enabled_count,
             disabled_count,
             filter,
+            &search,
             &expanded_plugins,
             open_select.as_ref(),
          );
       },
       Tab::Catalog => {
-         let installed: HashSet<String> = plugins.iter().map(|p| p.name.clone()).collect();
-         root = render_catalog_tab(&b, root, &installed, cat_desktop, cat_partial, cat_mobile);
+         root = render_catalog_tab(&b, root, &plugins, cat_category, &search);
       },
       Tab::General => {
          root = render_general_tab(&b, root);
@@ -1639,6 +1977,7 @@ fn render_plugins_tab(
    enabled_count: usize,
    disabled_count: usize,
    filter: PluginFilter,
+   search: &str,
    expanded: &HashSet<String>,
    open_select: Option<&(String, String)>,
 ) -> RawDiv {
@@ -1677,6 +2016,33 @@ fn render_plugins_tab(
    );
 
    let mut right_actions = b.h_row(6.0, false);
+   let search_lbl = if search.is_empty() {
+      "Search...".to_owned()
+   } else {
+      format!("Search: {search}")
+   };
+   right_actions = b.push_button(
+      right_actions,
+      "sunbird-plugins-search",
+      &search_lbl,
+      if search.is_empty() {
+         BtnVariant::Secondary
+      } else {
+         BtnVariant::Primary
+      },
+      BtnSize::Small,
+      Action::OpenSearch,
+   );
+   if !search.is_empty() {
+      right_actions = b.push_button(
+         right_actions,
+         "sunbird-plugins-search-clear",
+         "Clear",
+         BtnVariant::Secondary,
+         BtnSize::Small,
+         Action::ClearSearch,
+      );
+   }
    right_actions = b.push_button(
       right_actions,
       "sunbird-toolbar-install-url",
@@ -1707,14 +2073,30 @@ fn render_plugins_tab(
    toolbar = b.push_div(toolbar, right_actions);
    root = b.push_div(root, toolbar);
 
+   let query = search.to_ascii_lowercase();
    let filtered: Vec<&phoenix_runtime::PluginInfo> = plugins
       .iter()
       .filter(|p| {
-         match filter {
+         let state_ok = match filter {
             PluginFilter::All => true,
             PluginFilter::Enabled => p.enabled,
             PluginFilter::Disabled => !p.enabled,
+         };
+         if !state_ok {
+            return false;
          }
+         if query.is_empty() {
+            return true;
+         }
+         p.name.to_ascii_lowercase().contains(&query)
+            || p.header
+               .description
+               .as_deref()
+               .is_some_and(|d| d.to_ascii_lowercase().contains(&query))
+            || p.header
+               .author
+               .as_deref()
+               .is_some_and(|a| a.to_ascii_lowercase().contains(&query))
       })
       .collect();
 
@@ -1996,77 +2378,6 @@ fn render_plugins_tab(
    b.push_div(root, list)
 }
 
-#[expect(clippy::too_many_arguments, reason = "one per GPUI row part")]
-fn render_catalog_group(
-   b: &Builder,
-   mut root: RawDiv,
-   group_id: u8,
-   title: &str,
-   subtitle: &str,
-   items: &[&Listed],
-   installed: &HashSet<String>,
-   open: bool,
-) -> RawDiv {
-   if items.is_empty() {
-      return root;
-   }
-   let btn_lbl = if open {
-      format!("▾ Hide ({})", items.len())
-   } else {
-      format!("▸ Show ({})", items.len())
-   };
-   let mut section = b.card(10.0, 14.0, 8.0, 0.18);
-   section = b.push_div(
-      section,
-      b.action_row(
-         &format!("sunbird-cat-group-{group_id}"),
-         title,
-         subtitle,
-         &btn_lbl,
-         BtnVariant::Secondary,
-         BtnSize::Small,
-         Action::ToggleCatalogGroup(group_id),
-      ),
-   );
-   if open {
-      section = b.push_div(section, b.divider());
-      let mut list = b.v_stack(8.0);
-      for item in items {
-         let is_installed = installed.contains(&item.name);
-         let compat = DesktopCompat::of(&item.name);
-         let sub = match &item.warning {
-            Some(w) if !w.is_empty() => format!("{} · Note: {w}", item.description),
-            _ => item.description.clone(),
-         };
-         let mut row_card = b.card(8.0, 12.0, 6.0, 0.14);
-         row_card = b.push_div(
-            row_card,
-            b.action_row(
-               &format!("sunbird-cat-{}", item.name),
-               &item.name,
-               &sub,
-               if is_installed { "Reinstall" } else { "Install" },
-               if is_installed {
-                  BtnVariant::Secondary
-               } else {
-                  BtnVariant::Primary
-               },
-               BtnSize::Small,
-               Action::InstallCatalog(item.name.clone()),
-            ),
-         );
-         if let Some(badge) = b.compat_badge(compat) {
-            let tag_row = b.push_div(b.h_row(6.0, false), badge);
-            row_card = b.push_div(row_card, tag_row);
-         }
-         list = b.push_div(list, row_card);
-      }
-      section = b.push_div(section, list);
-   }
-   root = b.push_div(root, section);
-   root
-}
-
 #[expect(
    clippy::too_many_lines,
    reason = "one GPUI element tree, built top to bottom"
@@ -2074,23 +2385,55 @@ fn render_catalog_group(
 fn render_catalog_tab(
    b: &Builder,
    mut root: RawDiv,
-   installed: &HashSet<String>,
-   desktop_open: bool,
-   partial_open: bool,
-   mobile_open: bool,
+   plugins: &[phoenix_runtime::PluginInfo],
+   category: CatalogCategory,
+   search: &str,
 ) -> RawDiv {
-   root = b.push_div(
-      root,
-      b.action_row(
-         "sunbird-catalog-refresh",
-         "Official Plugin Catalog",
-         "Install plugins directly from assets.sunbird.tools.",
-         "Refresh",
+   let installed_map: std::collections::HashMap<&str, bool> =
+      plugins.iter().map(|p| (p.name.as_str(), p.enabled)).collect();
+
+   // Top toolbar: Search + Refresh
+   let mut top_left = b.h_row(6.0, false);
+   let search_lbl = if search.is_empty() {
+      "Search Catalog...".to_owned()
+   } else {
+      format!("Search: {search}")
+   };
+   top_left = b.push_button(
+      top_left,
+      "sunbird-catalog-search",
+      &search_lbl,
+      if search.is_empty() {
+         BtnVariant::Secondary
+      } else {
+         BtnVariant::Primary
+      },
+      BtnSize::Small,
+      Action::OpenSearch,
+   );
+   if !search.is_empty() {
+      top_left = b.push_button(
+         top_left,
+         "sunbird-catalog-search-clear",
+         "Clear",
          BtnVariant::Secondary,
          BtnSize::Small,
-         Action::RefreshCatalog,
-      ),
+         Action::ClearSearch,
+      );
+   }
+   let mut top_right = b.h_row(6.0, false);
+   top_right = b.push_button(
+      top_right,
+      "sunbird-catalog-refresh",
+      "Refresh",
+      BtnVariant::Secondary,
+      BtnSize::Small,
+      Action::RefreshCatalog,
    );
+   let mut top_bar = b.h_row(8.0, true);
+   top_bar = b.push_div(top_bar, top_left);
+   top_bar = b.push_div(top_bar, top_right);
+   root = b.push_div(root, top_bar);
 
    let catalog = update::catalog();
    match catalog {
@@ -2100,8 +2443,8 @@ fn render_catalog_tab(
          box_div = b.push_div(
             box_div,
             b.text_block(
-               "Fetching catalog...",
-               "Loading official plugins from assets.sunbird.tools.",
+               "Loading Plugin Catalog...",
+               "Loading bundled Equicord ports and official Sunbird plugins.",
             ),
          );
          root = b.push_div(root, box_div);
@@ -2111,8 +2454,8 @@ fn render_catalog_tab(
          box_div = b.push_div(
             box_div,
             b.text_block(
-               "Fetching catalog...",
-               "Loading official plugins from assets.sunbird.tools.",
+               "Loading Plugin Catalog...",
+               "Loading bundled Equicord ports and official Sunbird plugins.",
             ),
          );
          root = b.push_div(root, box_div);
@@ -2134,54 +2477,116 @@ fn render_catalog_tab(
          root = b.push_div(root, box_div);
       },
       Catalog::Loaded(items) => {
-         let desktop: Vec<&Listed> = items
+         // Equicord-style category filter bar
+         let mut pills = b.h_row(6.0, false);
+         for cat in CatalogCategory::ALL {
+            let count = items
+               .iter()
+               .filter(|i| cat.matches(i, installed_map.contains_key(i.name.as_str())))
+               .count();
+            let label = format!("{} ({count})", cat.label());
+            pills = b.push_button(
+               pills,
+               &format!("sunbird-cat-tab-{}", cat.label()),
+               &label,
+               if category == cat {
+                  BtnVariant::Primary
+               } else {
+                  BtnVariant::Secondary
+               },
+               BtnSize::Small,
+               Action::SetCatalogCategory(cat),
+            );
+         }
+         root = b.push_div(root, pills);
+
+         let query = search.to_ascii_lowercase();
+         let filtered: Vec<&Listed> = items
             .iter()
-            .filter(|i| DesktopCompat::of(&i.name) == DesktopCompat::Full)
-            .collect();
-         let partial: Vec<&Listed> = items
-            .iter()
-            .filter(|i| DesktopCompat::of(&i.name) == DesktopCompat::Partial)
-            .collect();
-         let other: Vec<&Listed> = items
-            .iter()
-            .filter(|i| {
-               matches!(
-                  DesktopCompat::of(&i.name),
-                  DesktopCompat::MobileOnly | DesktopCompat::Unverified
-               )
+            .filter(|item| {
+               let is_inst = installed_map.contains_key(item.name.as_str());
+               if !category.matches(item, is_inst) {
+                  return false;
+               }
+               if query.is_empty() {
+                  return true;
+               }
+               item.name.to_ascii_lowercase().contains(&query)
+                  || item.description.to_ascii_lowercase().contains(&query)
+                  || item
+                     .category
+                     .as_deref()
+                     .is_some_and(|c| c.to_ascii_lowercase().contains(&query))
+                  || item
+                     .author
+                     .as_deref()
+                     .is_some_and(|a| a.to_ascii_lowercase().contains(&query))
             })
             .collect();
 
-         root = render_catalog_group(
-            b,
-            root,
-            0,
-            "Desktop Ready",
-            "Confirmed working on Desktop Phoenix.",
-            &desktop,
-            installed,
-            desktop_open,
-         );
-         root = render_catalog_group(
-            b,
-            root,
-            1,
-            "Partial Desktop Support",
-            "Core hooks work on desktop; some features are still pending or unconfirmed.",
-            &partial,
-            installed,
-            partial_open,
-         );
-         root = render_catalog_group(
-            b,
-            root,
-            2,
-            "Mobile Only & Unverified",
-            "Targets Android Phoenix's UI tree or has not been confirmed on desktop yet.",
-            &other,
-            installed,
-            mobile_open,
-         );
+         if filtered.is_empty() {
+            let mut empty = b.card(8.0, 14.0, 8.0, 0.16);
+            empty = b.push_div(
+               empty,
+               b.text_block("No matching plugins", "Try another search query or category."),
+            );
+            return b.push_div(root, empty);
+         }
+
+         let mut list = b.v_stack(8.0);
+         for item in filtered {
+            let enabled = installed_map.get(item.name.as_str()).copied();
+            let compat = DesktopCompat::of(&item.name);
+            let mut meta = Vec::new();
+            if let Some(cat) = &item.category {
+               meta.push(format!("[{cat}]"));
+            }
+            if let Some(author) = &item.author {
+               meta.push(author.clone());
+            }
+            if !item.description.is_empty() {
+               meta.push(item.description.clone());
+            }
+            if let Some(w) = &item.warning
+               && !w.is_empty()
+            {
+               meta.push(format!("Note: {w}"));
+            }
+            let sub = meta.join(" · ");
+
+            let mut row_card = b.card(8.0, 12.0, 6.0, if enabled == Some(true) { 0.24 } else { 0.14 });
+            if let Some(is_enabled) = enabled {
+               row_card = b.push_div(
+                  row_card,
+                  b.switch_row(
+                     &format!("sunbird-cat-sw-{}", item.name),
+                     &item.name,
+                     Some(&sub),
+                     is_enabled,
+                     Action::TogglePlugin(item.name.clone()),
+                  ),
+               );
+            } else {
+               row_card = b.push_div(
+                  row_card,
+                  b.action_row(
+                     &format!("sunbird-cat-{}", item.name),
+                     &item.name,
+                     &sub,
+                     "Install",
+                     BtnVariant::Primary,
+                     BtnSize::Small,
+                     Action::InstallCatalog(item.name.clone()),
+                  ),
+               );
+            }
+            if let Some(badge) = b.compat_badge(compat) {
+               let tag_row = b.push_div(b.h_row(6.0, false), badge);
+               row_card = b.push_div(row_card, tag_row);
+            }
+            list = b.push_div(list, row_card);
+         }
+         root = b.push_div(root, list);
       },
    }
    root

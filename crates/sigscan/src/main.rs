@@ -746,6 +746,51 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
             phoenix_sigs::macos::pages_under_frame(image).map(at),
          );
          report(
+            "unlimited accounts",
+            phoenix_sigs::macos::unlimited_accounts(image).map(at),
+         );
+         report(
+            "no push to talk",
+            phoenix_sigs::macos::no_push_to_talk(image).map(at),
+         );
+         report(
+            "show hidden channels",
+            phoenix_sigs::macos::show_hidden_channels(image).map(|sites| {
+               sites
+                  .into_iter()
+                  .map(|(pc, _)| at(pc))
+                  .collect::<Vec<_>>()
+                  .join(", ")
+            }),
+         );
+         report(
+            "theme json parse",
+            phoenix_sigs::macos::theme_json_parse(image).map(at),
+         );
+         report(
+            "volume booster",
+            phoenix_sigs::macos::volume_booster(image).map(|sites| {
+               sites
+                  .into_iter()
+                  .map(at)
+                  .collect::<Vec<_>>()
+                  .join(", ")
+            }),
+         );
+         report(
+            "better screenshare",
+            phoenix_sigs::macos::better_screenshare(image).map(at),
+         );
+         report(
+            "guild folders",
+            phoenix_sigs::macos::guild_folders(image)
+               .map(|(toggle, collapse)| format!("toggle {}, collapse {}", at(toggle), at(collapse))),
+         );
+         report(
+            "rail view render",
+            phoenix_sigs::macos::rail_view_render(image).map(at),
+         );
+         report(
             "emoji check",
             phoenix_sigs::macos::emoji_check(image).map(|found| format!("{found:x?}")),
          );

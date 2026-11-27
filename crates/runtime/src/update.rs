@@ -52,11 +52,15 @@ pub struct Update {
    pub plugin_crcs: BTreeMap<String, u32>,
 }
 
-/// A plugin the site offers, as `plugins/index.json` lists it.
+/// A plugin the site or local catalog offers, as `plugins/index.json` lists it.
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub struct Listed {
    pub name:        String,
    pub description: String,
+   #[serde(default)]
+   pub category:    Option<String>,
+   #[serde(default)]
+   pub author:      Option<String>,
    #[serde(default)]
    pub warning:     Option<String>,
 }
@@ -105,23 +109,61 @@ pub fn catalog() -> Catalog {
       .clone()
 }
 
-/// Fetches the site's plugin list in the background, unless it is loaded or
-/// on its way. A failed fetch is retried on the next call.
+fn local_catalog_dir() -> Option<std::path::PathBuf> {
+   let dir = crate::state()?.plugins_dir().with_file_name("catalog");
+   dir.is_dir().then_some(dir)
+}
+
+fn read_local_catalog() -> Vec<Listed> {
+   let Some(dir) = local_catalog_dir() else {
+      return Vec::new();
+   };
+   let Ok(bytes) = fs::read(dir.join("index.json")) else {
+      return Vec::new();
+   };
+   serde_json::from_slice::<Vec<Listed>>(&bytes).unwrap_or_default()
+}
+
+/// Fetches the plugin catalog in the background, merging the local bundled
+/// catalog (when present) with `assets.sunbird.tools`.
 pub fn fetch_catalog() {
    {
       let mut catalog = CATALOG.lock().unwrap_or_else(PoisonError::into_inner);
       if matches!(*catalog, Catalog::Loading | Catalog::Loaded(_)) {
          return;
       }
-      *catalog = Catalog::Loading;
+      let local = read_local_catalog();
+      if local.is_empty() {
+         *catalog = Catalog::Loading;
+      } else {
+         *catalog = Catalog::Loaded(local);
+      }
    }
    thread::spawn(|| {
+      let local = read_local_catalog();
       let fetched = crate::fetch::get(&format!("{ASSETS}plugins/index.json"))
          .map_err(|err| err.to_string())
          .and_then(|body| {
             serde_json::from_slice::<Vec<Listed>>(&body).map_err(|err| err.to_string())
          });
-      *CATALOG.lock().unwrap_or_else(PoisonError::into_inner) = match fetched {
+      let merged = match fetched {
+         Ok(remote) => {
+            let mut by_name: BTreeMap<String, Listed> = BTreeMap::new();
+            for item in remote {
+               by_name.insert(item.name.clone(), item);
+            }
+            for item in local {
+               by_name.insert(item.name.clone(), item);
+            }
+            Ok(by_name.into_values().collect::<Vec<_>>())
+         },
+         Err(err) if !local.is_empty() => {
+            log::info!("plugin list (using local catalog): {err}");
+            Ok(local)
+         },
+         Err(err) => Err(err),
+      };
+      *CATALOG.lock().unwrap_or_else(PoisonError::into_inner) = match merged {
          Ok(listed) => Catalog::Loaded(listed),
          Err(err) => {
             log::info!("plugin list: {err}");
@@ -132,10 +174,14 @@ pub fn fetch_catalog() {
    });
 }
 
-/// Installs a plugin the site lists. Site plugins can call API an older loader
-/// lacks, so platforms with an in-app loader updater wait until the loader is
-/// current.
+/// Installs a plugin from the local catalog when present, or from the site.
 pub fn install_listed(name: &str) -> Result<crate::installer::Installed, crate::Error> {
+   if let Some(dir) = local_catalog_dir() {
+      let path = dir.join(format!("{name}.js"));
+      if let Ok(bytes) = fs::read(&path) {
+         return crate::install_file(&format!("{name}.js"), bytes);
+      }
+   }
    let updates_loader = crate::platform().is_some_and(<dyn crate::Platform>::updates_loader);
    if updates_loader && let Some(version) = found().and_then(|update| update.loader) {
       return Err(crate::Error::LoaderOutdated { version });
